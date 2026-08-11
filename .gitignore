@@ -1,17 +1,4 @@
-# Datasets and Databases
-*.csv
-*.db
-data/
-football_dataset/
-
-# Machine Learning Models & Artifacts
-*.pkl
-*.cbm
-model/
-mlruns/
-catboost_info/
-
-# Python Cache and Environments
+# Python Cache and Virtual Environments
 __pycache__/
 *.pyc
 .env
@@ -19,3 +6,15 @@ __pycache__/
 env/
 venv/
 .ipynb_checkpoints/
+
+# ML Experiment Logs & Temporary Outputs
+catboost_info/
+mlruns/
+football_dataset/
+
+# Ignore everything in data EXCEPT football_data.db
+data/*
+!data/football_data.db
+
+# NOTE: Do NOT ignore model/, *.pkl, *.cbm, df1_raw.csv, or team_df_raw.csv 
+# because Render requires them to start your API server!
