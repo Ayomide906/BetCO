@@ -1,12 +1,67 @@
 import sqlite3
 import pandas as pd
 import numpy as np
+import difflib
 from pathlib import Path
 
 # Define paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "football_data.db"
 DATA_DIR = BASE_DIR / "data"
+
+# ==========================================
+# 1. TEAM STANDARDIZATION LOGIC
+# ==========================================
+VALID_TEAMS = [
+    'Man City', 'West Ham', 'Middlesbrough', 'Southampton', 'Everton',
+    'Aston Villa', 'Bradford', 'Arsenal', 'Ipswich', 'Newcastle',
+    'Liverpool', 'Chelsea', 'Man United', 'Tottenham', 'Charlton',
+    'Sunderland', 'Derby', 'Coventry', 'Leicester', 'Leeds',
+    'Blackburn', 'Bolton', 'Fulham', 'West Brom', 'Birmingham',
+    'Wolves', 'Portsmouth', 'Crystal Palace', 'Norwich', 'Wigan',
+    'Watford', 'Sheffield United', 'Reading', 'Stoke', 'Hull',
+    'Burnley', 'Blackpool', 'Swansea', 'QPR', 'Cardiff', 'Bournemouth',
+    'Huddersfield', 'Brighton', 'Brentford', "Nott'm Forest", 'Luton'
+]
+
+TEAM_ALIASES = {
+    "manchester united": "Man United",
+    "man utd": "Man United",
+    "manchester city": "Man City",
+    "nottingham forest": "Nott'm Forest",
+    "spurs": "Tottenham",
+    "wolverhampton": "Wolves",
+    "wolverhampton wanderers": "Wolves",
+    "newcastle united": "Newcastle",
+    "west ham united": "West Ham",
+    "leeds united": "Leeds",
+    "leicester city": "Leicester",
+    "queens park rangers": "QPR"
+}
+
+def standardize_team_name(input_name: str) -> str:
+    if not isinstance(input_name, str):
+        return input_name
+    clean_input = input_name.strip().lower()
+    
+    if clean_input in TEAM_ALIASES:
+        return TEAM_ALIASES[clean_input]
+        
+    for valid_team in VALID_TEAMS:
+        if clean_input == valid_team.lower():
+            return valid_team
+            
+    matches = difflib.get_close_matches(clean_input, [t.lower() for t in VALID_TEAMS], n=1, cutoff=0.6)
+    if matches:
+        for valid_team in VALID_TEAMS:
+            if valid_team.lower() == matches[0]:
+                return valid_team
+                
+    return input_name.strip().title()
+
+# ==========================================
+# 2. FEATURE ENGINEERING HELPERS
+# ==========================================
 def calc_win_streak(results):
     streak=0
     out=[]
@@ -17,6 +72,7 @@ def calc_win_streak(results):
         elif result=='L' or result=='D':
             streak=0
     return out
+
 def get_ho(df):
     if df['FullTimeResult']=='D':
         ho='D'
@@ -25,6 +81,7 @@ def get_ho(df):
     else:
         ho='L'
     return ho
+
 def get_aw(df):
     if df['FullTimeResult']=='D':
         aw='D'
@@ -33,6 +90,7 @@ def get_aw(df):
     else:
         aw='W'
     return aw
+
 def get_ho_points(df):
     if df['FullTimeResult']=='D':
         ho=1
@@ -41,6 +99,7 @@ def get_ho_points(df):
     else:
         ho=0
     return ho
+
 def get_aw_points(df):
     if df['FullTimeResult']=='D':
         aw=1
@@ -49,16 +108,7 @@ def get_aw_points(df):
     else:
         aw=3
     return aw
-def calc_win_streak(results):
-    streak=0
-    out=[]
-    for result in results:
-        out.append(streak)
-        if result=='W':
-            streak+=1
-        elif result=='L' or result=='D':
-            streak=0
-    return out
+
 def get_points(df):
     if (df['Venue']=='Home' and df['Result']=='H') or (df['Venue']=='Away' and df['Result']=='A'):
         point=3
@@ -75,6 +125,9 @@ def create_rolling_feature(df,source,column,window):
     )
     return feature
 
+# ==========================================
+# 3. MAIN DATA PIPELINE
+# ==========================================
 def update_training_data():
     print("Fetching raw data from database...")
     conn = sqlite3.connect(DB_PATH)
@@ -84,13 +137,16 @@ def update_training_data():
     team_df = pd.read_sql_query("SELECT * FROM team_stats_raw ORDER BY Team, MatchDate", conn)
     conn.close()
 
+    print("Standardizing team names...")
+    # CRITICAL: Clean names BEFORE groupby and rolling calculations!
+    df1['HomeTeam'] = df1['HomeTeam'].apply(standardize_team_name)
+    df1['AwayTeam'] = df1['AwayTeam'].apply(standardize_team_name)
+    
+    team_df['Team'] = team_df['Team'].apply(standardize_team_name)
+    team_df['Opponent'] = team_df['Opponent'].apply(standardize_team_name)
+
     print("Running feature engineering logic...")
 
-    # =====================================================================
-    # ⬇️ PASTE ALL YOUR NOTEBOOK FEATURE ENGINEERING CODE HERE ⬇️
-    # =====================================================================
-    # Example (replace with your actual notebook code):
-    
     # 1. team_df overall rollings
     team_df["GoalsMeanL5"] = create_rolling_feature(team_df,'Team','GoalsFor',5)
     team_df["GoalsConcededL5"] = create_rolling_feature(team_df,'Team','GoalsAgainst',5)
@@ -119,8 +175,9 @@ def update_training_data():
         .reset_index(drop=True)
         )
     team_df['H2HL5']=create_rolling_feature(team_df,['Team','Opponent'],'points',5)
+    
     # 2. df1 venue-dependent rollings
-    df1['era']=df1['Season'].apply(lambda x: 2026 -int(x.split('/')[0]))
+    df1['era']=df1['Season'].apply(lambda x: 2026 -int(str(x).split('/')[0])) # Added string cast for safety
     df1['HomeGoalsMeanL5']=create_rolling_feature(df1,'HomeTeam','FullTimeHomeGoals',5)
     df1['AwayGoalsMeanL5']=create_rolling_feature(df1,'HomeTeam','FullTimeAwayGoals',5)
     df1['HomeGoalsConcededL5']=create_rolling_feature(df1,'HomeTeam','FullTimeAwayGoals',5)
@@ -139,8 +196,6 @@ def update_training_data():
     df1['WinStreakL5Home']=df1.groupby('HomeTeam')['HO'].transform(calc_win_streak)
     df1['WinStreakL5Away']=df1.groupby('AwayTeam')['AW'].transform(calc_win_streak)
         
-    # ... (Your existing df1 and team_df rolling calculations) ...
-    
     # Rename your df1 venue-dependent columns to match what the model expects
     df1.rename(columns={
         'HomeGoalsMeanL5': 'HomeGoalsMeanL5Venuedpd',
@@ -153,9 +208,6 @@ def update_training_data():
         'AwayPointsL5': 'AwayPointsL5Venuedpd'
     }, inplace=True)
 
-    # ==========================================
-    # 3. MERGING LOGIC
-    # ==========================================
     print("Merging venue and overall features...")
     
     # Isolate the overall features you calculated in team_df
@@ -180,13 +232,7 @@ def update_training_data():
     merged_df = pd.merge(df1, home_overall, on=['MatchDate', 'HomeTeam'], how='inner')
     merged_df = pd.merge(merged_df, away_overall, on=['MatchDate', 'AwayTeam'], how='inner')
 
-    # ==========================================
-    # 4. ODDS, PROBABILITIES & DERIVED FEATURES
-    # ==========================================
     print("Calculating market and derived features...")
-    
-    # Assuming ingest.py saved the odds as 'HomeOdds', 'DrawOdds', 'AwayOdds'
-    # (If they are saved as B365H, etc., rename them here first)
     
     # Calculate implied probabilities
     merged_df['HomeProb'] = (1 / merged_df['HomeOdds']) / ((1 / merged_df['HomeOdds']) + (1 / merged_df['DrawOdds']) + (1 / merged_df['AwayOdds']))
@@ -200,16 +246,8 @@ def update_training_data():
     merged_df['GoalFormDiffL5'] = merged_df['HomeGoalDFMeanL5'] - merged_df['AwayGoalDFMeanL5']
     merged_df['FormDiff'] = merged_df['HomePointsMeanL5'] - merged_df['AwayPointsMeanL5']
 
-    # =====================================================================
-    # ⬆️ END OF NOTEBOOK CODE ⬆️
-    # =====================================================================
-    # =====================================================================
-    # ⬆️ END OF NOTEBOOK CODE ⬆️
-    # =====================================================================
-
     print("Cleaning up final dataset...")
 
-    # Define the exact 48 features your model expects, plus the target label
     target_cols = ['FullTimeResult', 'FullTimeHomeGoals', 'FullTimeAwayGoals']
     feature_cols = [
         'HomeTeam', 'AwayTeam', 'era', 'HomeGoalsMeanL5Venuedpd',
@@ -226,15 +264,12 @@ def update_training_data():
         'AwayGoalDFMeanL10', 'AwayGoalDFMeanL5', 'AwayPointsMeanL5',
         'AwayPointsMeanL10', 'AwayGoalsMeanL10', 'AwayGoalsConcededL10',
         'Awaywin_streak', 'AwayH2HL5', 'AwayRedCardL2',
-    
         'HomeAttackVsAwayDefense', 'AwayAttackVsHomeDefense', 'GoalFormDiffL5',
         'FormDiff'
     ]
 
-    # Drop any rows with NaN values (which usually happen in the first 5-10 matches of a season due to rolling windows)
     merged_df = merged_df.dropna(subset=feature_cols)
 
-    # Slice the dataframe to keep ONLY the required columns (this auto-drops raw columns)
     X_train = merged_df[feature_cols]
     y_train = merged_df[target_cols]
 

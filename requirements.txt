@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+httpx
+joblib
+catboost
+scipy
+shap
+python-dotenv
+scikit-learn
+mlflow
+pytest
+pytest-asyncio

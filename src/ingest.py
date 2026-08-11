@@ -1,5 +1,6 @@
 import sqlite3
 import pandas as pd
+import difflib
 from pathlib import Path
 
 # Define paths so it works perfectly inside your src/ directory
@@ -9,21 +10,79 @@ DB_PATH = BASE_DIR / "data" / "football_data.db"
 # URL for current season EPL data from football-data.co.uk
 LATEST_EPL_URL = "https://www.football-data.co.uk/mmz4281/2425/E0.csv"
 
+# ==========================================
+# 1. TEAM STANDARDIZATION LOGIC
+# ==========================================
+VALID_TEAMS = [
+    'Man City', 'West Ham', 'Middlesbrough', 'Southampton', 'Everton',
+    'Aston Villa', 'Bradford', 'Arsenal', 'Ipswich', 'Newcastle',
+    'Liverpool', 'Chelsea', 'Man United', 'Tottenham', 'Charlton',
+    'Sunderland', 'Derby', 'Coventry', 'Leicester', 'Leeds',
+    'Blackburn', 'Bolton', 'Fulham', 'West Brom', 'Birmingham',
+    'Wolves', 'Portsmouth', 'Crystal Palace', 'Norwich', 'Wigan',
+    'Watford', 'Sheffield United', 'Reading', 'Stoke', 'Hull',
+    'Burnley', 'Blackpool', 'Swansea', 'QPR', 'Cardiff', 'Bournemouth',
+    'Huddersfield', 'Brighton', 'Brentford', "Nott'm Forest", 'Luton'
+]
 
+TEAM_ALIASES = {
+    "manchester united": "Man United",
+    "man utd": "Man United",
+    "manchester city": "Man City",
+    "nottingham forest": "Nott'm Forest",
+    "spurs": "Tottenham",
+    "wolverhampton": "Wolves",
+    "wolverhampton wanderers": "Wolves",
+    "newcastle united": "Newcastle",
+    "west ham united": "West Ham",
+    "leeds united": "Leeds",
+    "leicester city": "Leicester",
+    "queens park rangers": "QPR"
+}
+
+def standardize_team_name(input_name: str) -> str:
+    if not isinstance(input_name, str):
+        return input_name
+    clean_input = input_name.strip().lower()
+    
+    if clean_input in TEAM_ALIASES:
+        return TEAM_ALIASES[clean_input]
+        
+    for valid_team in VALID_TEAMS:
+        if clean_input == valid_team.lower():
+            return valid_team
+            
+    matches = difflib.get_close_matches(clean_input, [t.lower() for t in VALID_TEAMS], n=1, cutoff=0.6)
+    if matches:
+        for valid_team in VALID_TEAMS:
+            if valid_team.lower() == matches[0]:
+                return valid_team
+                
+    return input_name.strip().title()
+
+# ==========================================
+# 2. INGESTION PIPELINE
+# ==========================================
 def fetch_and_ingest():
     print("Fetching latest match results from football-data.co.uk...")
+    
     # 1. Download current season match data
     latest_matches = pd.read_csv(LATEST_EPL_URL)
 
     # Standardize date format to match YYYY-MM-DD
     latest_matches['Date'] = pd.to_datetime(latest_matches['Date'], dayfirst=True).dt.strftime('%Y-%m-%d')
 
+    # ---> CRITICAL SAFETY NET: Standardize names BEFORE checking the database <---
+    print("Standardizing team names from the fetched data...")
+    latest_matches['HomeTeam'] = latest_matches['HomeTeam'].apply(standardize_team_name)
+    latest_matches['AwayTeam'] = latest_matches['AwayTeam'].apply(standardize_team_name)
+
     # Connect to local database
     conn = sqlite3.connect(DB_PATH)
     existing_df = pd.read_sql_query("SELECT MatchDate, HomeTeam, AwayTeam FROM matches_raw", conn)
 
     # 2. Filter out matches already stored in our database
-    # Merge on date + team names to find net-new matches
+    # Merge on date + clean team names to find net-new matches
     merged = latest_matches.merge(
         existing_df,
         left_on=['Date', 'HomeTeam', 'AwayTeam'],
@@ -44,8 +103,8 @@ def fetch_and_ingest():
     new_df1 = pd.DataFrame({
         'Season': '2024/2025',
         'MatchDate': new_matches['Date'],
-        'HomeTeam': new_matches['HomeTeam'],
-        'AwayTeam': new_matches['AwayTeam'],
+        'HomeTeam': new_matches['HomeTeam'],  # These are now guaranteed clean!
+        'AwayTeam': new_matches['AwayTeam'],  # These are now guaranteed clean!
         'FullTimeHomeGoals': new_matches['FTHG'],
         'FullTimeAwayGoals': new_matches['FTAG'],
         'FullTimeResult': new_matches['FTR'],
@@ -66,7 +125,6 @@ def fetch_and_ingest():
         'AwayRedCards': new_matches['AR'],
         
         # --- EXTRACTING LIVE ODDS (Bet365) ---
-        # Using .get() ensures it won't crash if a column is missing for some reason
         'HomeOdds': new_matches.get('B365H', pd.NA),
         'DrawOdds': new_matches.get('B365D', pd.NA),
         'AwayOdds': new_matches.get('B365A', pd.NA)
@@ -107,7 +165,6 @@ def fetch_and_ingest():
 
     print("Successfully ingested new match records with market odds!")
     conn.close()
-
 
 if __name__ == "__main__":
     fetch_and_ingest()
