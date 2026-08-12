@@ -60,7 +60,9 @@ def train_and_evaluate():
             random_seed=42,
             verbose=0
         )
-        clf_model.fit(X_train, y_train_result, eval_set=(X_test, y_test_result))
+        # Change this
+        cat_features = ['HomeTeam', 'AwayTeam']
+        clf_model.fit(X_train, y_train_result, eval_set=(X_test, y_test_result), cat_features=cat_features)
         
         clf_preds = clf_model.predict(X_test)
         clf_probs = clf_model.predict_proba(X_test)
@@ -84,7 +86,7 @@ def train_and_evaluate():
             early_stopping_rounds=100,
             verbose=0
         )
-        hg_model.fit(X_train, y_train_h_goals, eval_set=(X_test, y_test_h_goals))
+        hg_model.fit(X_train, y_train_h_goals, eval_set=(X_test, y_test_h_goals),cat_features=cat_features)
         
         hg_preds = hg_model.predict(X_test)
         hg_rmse = np.sqrt(mean_squared_error(y_test_h_goals, hg_preds))
@@ -107,7 +109,7 @@ def train_and_evaluate():
             early_stopping_rounds=100,
             verbose=0
         )
-        ag_model.fit(X_train, y_train_a_goals, eval_set=(X_test, y_test_a_goals))
+        ag_model.fit(X_train, y_train_a_goals, eval_set=(X_test, y_test_a_goals),cat_features=cat_features)
         
         ag_preds = ag_model.predict(X_test)
         ag_rmse = np.sqrt(mean_squared_error(y_test_a_goals, ag_preds))
