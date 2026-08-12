@@ -9,7 +9,8 @@ def initialize_database():
     team_df_raw = pd.read_csv(BASE_DIR /'data'/ "team_df_raw.csv")
 
     # 2. Connect to SQLite (creates the file if it doesn't exist)
-    conn = sqlite3.connect('football_data.db')
+    # Inside db_setup.py:
+    conn = sqlite3.connect(BASE_DIR / "data" / "football_data.db")
 
     # 3. Store DataFrames as SQL tables
     df1_raw.to_sql('matches_raw', conn, if_exists='replace', index=False)
