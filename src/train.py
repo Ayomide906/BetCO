@@ -9,7 +9,8 @@ import os
 
 # 1. Silence GitPython warnings before importing MLflow
 os.environ["GIT_PYTHON_REFRESH"] = "0"
-
+# ADD THIS NEW LINE RIGHT HERE:
+os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
 # Define paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"

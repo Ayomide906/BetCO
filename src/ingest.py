@@ -6,9 +6,18 @@ from pathlib import Path
 # Define paths so it works perfectly inside your src/ directory
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "football_data.db"
+from datetime import datetime
 
+# Automatically calculate the football-data season string (e.g., '2627')
+now = datetime.now()
+if now.month >= 8: # August or later (New season started)
+    season = f"{str(now.year)[-2:]}{str(now.year + 1)[-2:]}"
+else: # Jan to July (Still in the previous year's season)
+    season = f"{str(now.year - 1)[-2:]}{str(now.year)[-2:]}"
+
+# Your dynamic URL
 # URL for current season EPL data from football-data.co.uk
-LATEST_EPL_URL = "https://www.football-data.co.uk/mmz4281/2425/E0.csv"
+LATEST_EPL_URL = f"https://www.football-data.co.uk/mmz4281/{season}/E0.csv"
 
 # ==========================================
 # 1. TEAM STANDARDIZATION LOGIC
