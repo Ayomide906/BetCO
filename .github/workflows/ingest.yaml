@@ -2,10 +2,10 @@ name: Weekly Football Data Ingestion
 
 on:
   schedule:
-    # Runs every Monday at 02:00 AM UTC
-    - cron: '0 2 * * 1'
-  workflow_dispatch: # Allows you to manually click a "Run" button in GitHub
-
+    # Runs Mondays at 23:00 UTC and Thursdays at 02:00 UTC
+    - cron: '0 23 * * 1'
+    - cron: '0 2 * * 4'
+  workflow_dispatch:
 jobs:
   ingest:
     runs-on: ubuntu-latest

@@ -6,7 +6,8 @@ load_dotenv()
 
 import joblib
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import Optional, List
 import pandas as pd
@@ -29,13 +30,29 @@ app = FastAPI(
     version="6.4.0"
 )
 
+# --- SECURITY & AUTHENTICATION CONFIGURATION ---
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
+
+def get_api_key(api_key: str = Depends(api_key_header)):
+    """
+    Validates incoming request headers against the secret APP_API_KEY environment variable.
+    """
+    expected_api_key = os.getenv("APP_API_KEY", "fallback-dev-key")
+    if api_key != expected_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API Key"
+        )
+    return api_key
+
 result_model = None
 home_goals_model = None
 away_goals_model = None
 feature_pipeline = None
 shap_explainer = None
 
-# Securely load API key from environment variables
+# Securely load API key from environment variables for external odds API
 STATS_API_KEY = os.getenv("STATS_API_KEY", "")
 STATS_API_BASE = "https://api.thestatsapi.com/api/football"
 
@@ -302,7 +319,7 @@ def health_check():
     return {"status": "online", "message": "BetCO Engine is running."}
 
 @app.post("/predict")
-async def predict_match(match: MatchRequest):
+async def predict_match(match: MatchRequest, api_key: str = Depends(get_api_key)):
     if not result_model or not feature_pipeline:
         raise HTTPException(status_code=500, detail="Models or pipeline not initialized.")
     try:
@@ -311,7 +328,7 @@ async def predict_match(match: MatchRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/predict-batch")
-async def predict_batch(batch: BatchMatchRequest):
+async def predict_batch(batch: BatchMatchRequest, api_key: str = Depends(get_api_key)):
     if not result_model or not feature_pipeline:
         raise HTTPException(status_code=500, detail="Models or pipeline not initialized.")
     
