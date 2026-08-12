@@ -7,14 +7,20 @@ env/
 venv/
 .ipynb_checkpoints/
 
-# ML Experiment Logs & Temporary Outputs
+# Temporary Outputs (Do NOT ignore mlruns/ anymore!)
 catboost_info/
-mlruns/
 football_dataset/
 
-# Ignore everything in data EXCEPT football_data.db
+# ---------------------------------------------------
+# CRITICAL FOR AUTOMATION:
+# Do NOT ignore model/ or mlruns/ so GitHub Actions 
+# can save your models and experiment history!
+# ---------------------------------------------------
+
+# Ignore raw data EXCEPT the files we explicitly need for the API & Training
 data/*
 !data/football_data.db
-
-# NOTE: Do NOT ignore model/, *.pkl, *.cbm, df1_raw.csv, or team_df_raw.csv 
-# because Render requires them to start your API server!
+!data/df1_raw.csv
+!data/team_df_raw.csv
+!data/X_train.csv
+!data/y_train.csv

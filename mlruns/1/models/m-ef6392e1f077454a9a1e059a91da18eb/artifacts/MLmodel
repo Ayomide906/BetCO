@@ -1,0 +1,22 @@
+artifact_path: file:C:/code_py/MyProjects/Machine_learn_full_proj/BetCO/mlruns/1/models/m-ef6392e1f077454a9a1e059a91da18eb/artifacts
+flavors:
+  catboost:
+    catboost_version: 1.2.10
+    code: null
+    data: model.cb
+    model_type: CatBoostRegressor
+    save_format: cbm
+  python_function:
+    data: model.cb
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.catboost
+    python_version: 3.13.2
+mlflow_version: 3.6.0
+model_id: m-ef6392e1f077454a9a1e059a91da18eb
+model_size_bytes: 2642048
+model_uuid: m-ef6392e1f077454a9a1e059a91da18eb
+prompts: null
+run_id: 276cc5ddfdd144298e92a5e5481c3cfe
+utc_time_created: '2026-08-09 19:26:00.914515'
