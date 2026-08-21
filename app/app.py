@@ -148,31 +148,94 @@ def standardize_team_name(input_name: str) -> str:
     return input_name.strip().title()
 
 # --- LIVE STATS API ODDS FETCHING WITH PARSING & FALLBACK ---
+# --- LIVE STATS API ODDS FETCHING (MATCH ID ARCHITECTURE) ---
 async def fetch_live_bet365_odds(home_team: str, away_team: str):
     headers = {"Authorization": f"Bearer {STATS_API_KEY}"}
-    url = f"{STATS_API_BASE}/matches?status=scheduled&per_page=50"
+    
+    # STEP 1: Find the Match ID from the scheduled fixtures
+    fixtures_url = f"{STATS_API_BASE}/matches?status=scheduled&per_page=50"
     
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, headers=headers, timeout=5.0)
-            if response.status_code == 200:
-                data = response.json()
-                matches_list = data.get("data", data.get("matches", []))
+            fix_response = await client.get(fixtures_url, headers=headers, timeout=5.0)
+            if fix_response.status_code != 200:
+                return None
                 
-                for match in matches_list:
-                    h = standardize_team_name(match.get("homeTeam", match.get("home_team", "")))
-                    a = standardize_team_name(match.get("awayTeam", match.get("away_team", "")))
-                    
-                    if h.lower() == home_team.lower() and a.lower() == away_team.lower():
-                        odds = match.get("odds", {})
-                        return {
-                            "home_odds": float(odds.get("home", 2.0)),
-                            "draw_odds": float(odds.get("draw", 3.2)),
-                            "away_odds": float(odds.get("away", 3.5))
-                        }
+            data = fix_response.json()
+            matches_list = data.get("data", data.get("matches", []))
+            
+            match_id = None
+            for match in matches_list:
+                # Handle TheStatsAPI nested JSON structure for teams
+                h_team_data = match.get("home_team", match.get("homeTeam", {}))
+                a_team_data = match.get("away_team", match.get("awayTeam", {}))
+                
+                h_name = h_team_data.get("name", "") if isinstance(h_team_data, dict) else str(h_team_data)
+                a_name = a_team_data.get("name", "") if isinstance(a_team_data, dict) else str(a_team_data)
+                
+                h = standardize_team_name(h_name)
+                a = standardize_team_name(a_name)
+                
+                if h.lower() == home_team.lower() and a.lower() == away_team.lower():
+                    match_id = match.get("id", match.get("match_id"))
+                    break
+            
+            if not match_id:
+                print(f"Could not find a scheduled match ID for {home_team} vs {away_team}")
+                return None
+                
+            # STEP 2: Fetch specific pre-match odds using the Match ID
+            odds_url = f"{STATS_API_BASE}/matches/{match_id}/odds"
+            odds_response = await client.get(odds_url, headers=headers, timeout=5.0)
+            
+            if odds_response.status_code != 200:
+                return None
+                
+            odds_data = odds_response.json()
+            # Navigate to the bookmakers array
+            bookmakers = odds_data.get("data", {}).get("bookmakers", [])
+            
+            if not bookmakers:
+                return None
+                
+            # STEP 3: Extract 1X2 odds (Prioritize Bet365, otherwise take the first available)
+            target_bookie = None
+            for bookie in bookmakers:
+                if bookie.get("name", "").lower() == "bet365":
+                    target_bookie = bookie
+                    break
+            if not target_bookie and len(bookmakers) > 0:
+                target_bookie = bookmakers[0] # Fallback to Pinnacle, Betfair, etc.
+                
+            if target_bookie:
+                markets = target_bookie.get("markets", [])
+                for market in markets:
+                    # Look for the standard 1X2 market
+                    if market.get("name", "").lower() in ["1x2", "match_odds"]:
+                        outcomes = market.get("outcomes", [])
+                        home_odds, draw_odds, away_odds = None, None, None
+                        
+                        for outcome in outcomes:
+                            name = outcome.get("name", "").lower()
+                            price = float(outcome.get("price", outcome.get("odds", 0)))
+                            
+                            if name in ["home", "1", home_team.lower()]: home_odds = price
+                            elif name in ["draw", "x"]: draw_odds = price
+                            elif name in ["away", "2", away_team.lower()]: away_odds = price
+                            
+                        # ONLY return if we successfully grabbed all three actual odds
+                        if home_odds and draw_odds and away_odds:
+                            return {
+                                "home_odds": home_odds,
+                                "draw_odds": draw_odds,
+                                "away_odds": away_odds
+                            }
+            
+            # If we get here, valid odds were not found
             return None
+            
         except Exception as e:
-            print(f"TheStatsAPI connection warning: {e}")
+            print(f"TheStatsAPI connection error: {e}")
             return None
 
 def calculate_poisson_ou(expected_goals: float, line: float):
