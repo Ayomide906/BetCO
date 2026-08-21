@@ -40,19 +40,49 @@ TEAM_ALIASES = {
     "manchester city": "Man City",
     "nottingham forest": "Nott'm Forest",
     "spurs": "Tottenham",
+    "tottenham hotspur": "Tottenham",
     "wolverhampton": "Wolves",
     "wolverhampton wanderers": "Wolves",
     "newcastle united": "Newcastle",
     "west ham united": "West Ham",
     "leeds united": "Leeds",
     "leicester city": "Leicester",
-    "queens park rangers": "QPR"
+    "queens park rangers": "QPR",
+    "coventry city": "Coventry",
+    "hull city": "Hull",
+    "ipswich town": "Ipswich",
+    "brighton & hove albion": "Brighton",
+    "brighton and hove albion": "Brighton",
+    "aston villa": "Aston Villa",
+    "crystal palace": "Crystal Palace",
+    "charlton athletic": "Charlton",
+    "bolton wanderers": "Bolton",
+    "blackburn rovers": "Blackburn",
+    "sheffield united": "Sheffield United",
+    "west bromwich albion": "West Brom",
+    "west brom": "West Brom",
+    "bristol city": "Bristol City",
+    "luton town": "Luton",
+    "brentford fc": "Brentford",
+    "bournemouth": "Bournemouth",
+    "huddersfield town": "Huddersfield"
 }
 
 def standardize_team_name(input_name: str) -> str:
     if not isinstance(input_name, str):
-        return input_name
+        return str(input_name)
+    
     clean_input = input_name.strip().lower()
+    
+    # Strip formal API/club suffixes
+    tags_to_remove = [" f.c.", " a.f.c.", " football club", " fc", " afc"]
+    for tag in tags_to_remove:
+        if clean_input.endswith(tag):
+            clean_input = clean_input[:-len(tag)].strip()
+            
+    # Remove leading club prefixes
+    if clean_input.startswith("afc "):
+        clean_input = clean_input[4:].strip()
     
     if clean_input in TEAM_ALIASES:
         return TEAM_ALIASES[clean_input]

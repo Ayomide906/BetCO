@@ -27,7 +27,7 @@ DATA_DIR = BASE_DIR / "data"
 app = FastAPI(
     title="BetCO Live Prediction Engine",
     description="Live match outcome, Poisson goal market, market gap analysis, and batch prediction engine with fuzzy string matching.",
-    version="6.4.0"
+    version="6.5.0"
 )
 
 # --- SECURITY & AUTHENTICATION CONFIGURATION ---
@@ -60,7 +60,7 @@ STATS_API_BASE = "https://api.thestatsapi.com/api/football"
 class MatchRequest(BaseModel):
     home_team: str
     away_team: str
-    season: str = "2025/2026"
+    season: str = "2026/2027"
     home_odds: Optional[float] = None
     draw_odds: Optional[float] = None
     away_odds: Optional[float] = None
@@ -124,118 +124,137 @@ TEAM_ALIASES = {
     "manchester city": "Man City",
     "nottingham forest": "Nott'm Forest",
     "spurs": "Tottenham",
+    "tottenham hotspur": "Tottenham",
     "wolverhampton": "Wolves",
     "wolverhampton wanderers": "Wolves",
     "newcastle united": "Newcastle",
     "west ham united": "West Ham",
     "leeds united": "Leeds",
     "leicester city": "Leicester",
-    "queens park rangers": "QPR"
+    "queens park rangers": "QPR",
+    "coventry city": "Coventry",
+    "hull city": "Hull",
+    "ipswich town": "Ipswich",
+    "brighton & hove albion": "Brighton",
+    "brighton and hove albion": "Brighton",
+    "aston villa": "Aston Villa",
+    "crystal palace": "Crystal Palace",
+    "charlton athletic": "Charlton",
+    "bolton wanderers": "Bolton",
+    "blackburn rovers": "Blackburn",
+    "sheffield united": "Sheffield United",
+    "west bromwich albion": "West Brom",
+    "west brom": "West Brom",
+    "bristol city": "Bristol City",
+    "luton town": "Luton",
+    "brentford fc": "Brentford",
+    "bournemouth": "Bournemouth",
+    "huddersfield town": "Huddersfield"
 }
 
 def standardize_team_name(input_name: str) -> str:
+    if not isinstance(input_name, str):
+        return str(input_name)
+    
     clean_input = input_name.strip().lower()
+    
+    # Strip formal API suffixes
+    tags_to_remove = [" f.c.", " a.f.c.", " football club", " fc", " afc"]
+    for tag in tags_to_remove:
+        if clean_input.endswith(tag):
+            clean_input = clean_input[:-len(tag)].strip()
+            
+    # Remove leading prefixes (like "AFC Bournemouth")
+    if clean_input.startswith("afc "):
+        clean_input = clean_input[4:].strip()
+    
     if clean_input in TEAM_ALIASES:
         return TEAM_ALIASES[clean_input]
+        
     for valid_team in VALID_TEAMS:
         if clean_input == valid_team.lower():
             return valid_team
+            
     matches = difflib.get_close_matches(clean_input, [t.lower() for t in VALID_TEAMS], n=1, cutoff=0.6)
     if matches:
         for valid_team in VALID_TEAMS:
             if valid_team.lower() == matches[0]:
                 return valid_team
+                
     return input_name.strip().title()
 
-# --- LIVE STATS API ODDS FETCHING WITH PARSING & FALLBACK ---
 # --- LIVE STATS API ODDS FETCHING (MATCH ID ARCHITECTURE) ---
 async def fetch_live_bet365_odds(home_team: str, away_team: str):
+    if not STATS_API_KEY:
+        print("❌ STATS_API_KEY environment variable is not set!")
+        return None
+
     headers = {"Authorization": f"Bearer {STATS_API_KEY}"}
-    
-    # STEP 1: Find the Match ID from the scheduled fixtures
     fixtures_url = f"{STATS_API_BASE}/matches?status=scheduled&per_page=50"
     
     async with httpx.AsyncClient() as client:
         try:
-            fix_response = await client.get(fixtures_url, headers=headers, timeout=5.0)
-            if fix_response.status_code != 200:
+            # 1. Fetch Fixtures
+            fix_resp = await client.get(fixtures_url, headers=headers, timeout=5.0)
+            if fix_resp.status_code != 200:
+                print(f"❌ Fixtures endpoint returned status {fix_resp.status_code}: {fix_resp.text}")
                 return None
                 
-            data = fix_response.json()
+            data = fix_resp.json()
             matches_list = data.get("data", data.get("matches", []))
             
             match_id = None
             for match in matches_list:
-                # Handle TheStatsAPI nested JSON structure for teams
-                h_team_data = match.get("home_team", match.get("homeTeam", {}))
-                a_team_data = match.get("away_team", match.get("awayTeam", {}))
+                # Safely extract string name even if nested in a dict
+                h_raw = match.get("home_team", match.get("homeTeam", ""))
+                a_raw = match.get("away_team", match.get("awayTeam", ""))
                 
-                h_name = h_team_data.get("name", "") if isinstance(h_team_data, dict) else str(h_team_data)
-                a_name = a_team_data.get("name", "") if isinstance(a_team_data, dict) else str(a_team_data)
+                h_name = h_raw.get("name", "") if isinstance(h_raw, dict) else str(h_raw)
+                a_name = a_raw.get("name", "") if isinstance(a_raw, dict) else str(a_raw)
                 
-                h = standardize_team_name(h_name)
-                a = standardize_team_name(a_name)
+                h_std = standardize_team_name(h_name)
+                a_std = standardize_team_name(a_name)
                 
-                if h.lower() == home_team.lower() and a.lower() == away_team.lower():
+                if h_std.lower() == home_team.lower() and a_std.lower() == away_team.lower():
                     match_id = match.get("id", match.get("match_id"))
                     break
             
             if not match_id:
-                print(f"Could not find a scheduled match ID for {home_team} vs {away_team}")
+                print(f"⚠️ Match fixture not found in schedule for: {home_team} vs {away_team}")
                 return None
                 
-            # STEP 2: Fetch specific pre-match odds using the Match ID
+            # 2. Fetch Match Odds using the discovered Match ID
             odds_url = f"{STATS_API_BASE}/matches/{match_id}/odds"
-            odds_response = await client.get(odds_url, headers=headers, timeout=5.0)
-            
-            if odds_response.status_code != 200:
+            odds_resp = await client.get(odds_url, headers=headers, timeout=5.0)
+            if odds_resp.status_code != 200:
+                print(f"❌ Odds endpoint returned status {odds_resp.status_code} for match {match_id}")
                 return None
                 
-            odds_data = odds_response.json()
-            # Navigate to the bookmakers array
-            bookmakers = odds_data.get("data", {}).get("bookmakers", [])
+            odds_data = odds_resp.json()
+            bookmakers = odds_data.get("data", {}).get("bookmakers", odds_data.get("bookmakers", []))
             
             if not bookmakers:
+                print(f"⚠️ No bookmaker odds available for match {match_id}")
                 return None
-                
-            # STEP 3: Extract 1X2 odds (Prioritize Bet365, otherwise take the first available)
-            target_bookie = None
-            for bookie in bookmakers:
-                if bookie.get("name", "").lower() == "bet365":
-                    target_bookie = bookie
-                    break
-            if not target_bookie and len(bookmakers) > 0:
-                target_bookie = bookmakers[0] # Fallback to Pinnacle, Betfair, etc.
-                
-            if target_bookie:
-                markets = target_bookie.get("markets", [])
-                for market in markets:
-                    # Look for the standard 1X2 market
-                    if market.get("name", "").lower() in ["1x2", "match_odds"]:
-                        outcomes = market.get("outcomes", [])
-                        home_odds, draw_odds, away_odds = None, None, None
-                        
-                        for outcome in outcomes:
-                            name = outcome.get("name", "").lower()
-                            price = float(outcome.get("price", outcome.get("odds", 0)))
-                            
-                            if name in ["home", "1", home_team.lower()]: home_odds = price
-                            elif name in ["draw", "x"]: draw_odds = price
-                            elif name in ["away", "2", away_team.lower()]: away_odds = price
-                            
-                        # ONLY return if we successfully grabbed all three actual odds
-                        if home_odds and draw_odds and away_odds:
-                            return {
-                                "home_odds": home_odds,
-                                "draw_odds": draw_odds,
-                                "away_odds": away_odds
-                            }
-            
-            # If we get here, valid odds were not found
+
+            # 3. Parse Odds (Prioritize Bet365, otherwise fallback to first available)
+            target_bookie = next((b for b in bookmakers if b.get("name", "").lower() == "bet365"), bookmakers[0])
+            for market in target_bookie.get("markets", []):
+                if market.get("name", "").lower() in ["1x2", "match_odds"]:
+                    h_odd, d_odd, a_odd = None, None, None
+                    for outcome in market.get("outcomes", []):
+                        name = outcome.get("name", "").lower()
+                        price = float(outcome.get("price", outcome.get("odds", 0)))
+                        if name in ["home", "1", home_team.lower()]: h_odd = price
+                        elif name in ["draw", "x"]: d_odd = price
+                        elif name in ["away", "2", away_team.lower()]: a_odd = price
+                    
+                    if h_odd and d_odd and a_odd:
+                        return {"home_odds": h_odd, "draw_odds": d_odd, "away_odds": a_odd}
+
             return None
-            
         except Exception as e:
-            print(f"TheStatsAPI connection error: {e}")
+            print(f"❌ Unexpected error in fetch_live_bet365_odds: {e}")
             return None
 
 def calculate_poisson_ou(expected_goals: float, line: float):
