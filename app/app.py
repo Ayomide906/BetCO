@@ -138,236 +138,27 @@ def extract_match_odds_from_bookmaker(bookmaker: dict):
     return {"home_odds": home_price, "draw_odds": draw_price, "away_odds": away_price}
 
 async def fetch_prematch_odds(home_team: str, away_team: str):
-
-    if not STATS_API_KEY:
-        print("❌ STATS_API_KEY is empty")
-        return None
-
+    if not STATS_API_KEY: return None
     async with httpx.AsyncClient() as client:
-
         try:
-            print("=" * 70)
-            print(f"🔎 SEARCHING: {home_team} vs {away_team}")
-            print("=" * 70)
-
-            fixture = await find_stats_api_fixture(
-                client,
-                home_team,
-                away_team
-            )
-
-            if not fixture:
-                print("❌ NO FIXTURE FOUND")
-                return None
-
-            print("✅ FIXTURE FOUND")
-            print("RAW FIXTURE:")
-            print(fixture)
-
-            match_id = (
-                fixture.get("id")
-                or fixture.get("match_id")
-            )
-
-            print(f"🎯 MATCH ID: {match_id}")
-
-            if not match_id:
-                print("❌ Fixture has no match ID")
-                return None
-
-            odds_url = (
-                f"{STATS_API_BASE}"
-                f"/matches/{match_id}/odds"
-            )
-
-            print(f"📡 ODDS URL:")
-            print(odds_url)
-
-            headers = {
-                "Authorization": f"Bearer {STATS_API_KEY}",
-                "Accept": "application/json",
-            }
-
-            response = await client.get(
-                odds_url,
-                headers=headers,
-                timeout=15.0
-            )
-
-            print(
-                f"📥 ODDS HTTP STATUS: "
-                f"{response.status_code}"
-            )
-
-            print(
-                f"📥 ODDS RAW RESPONSE:"
-            )
-
-            print(
-                response.text[:5000]
-            )
-
-            if response.status_code != 200:
-                print(
-                    "❌ TheStatsAPI odds request failed"
-                )
-                return None
-
-            odds_payload = response.json()
-
-            data = odds_payload.get(
-                "data",
-                odds_payload
-            )
-
-            bookmakers = data.get(
-                "bookmakers",
-                []
-            )
-
-            print(
-                f"📚 BOOKMAKERS:"
-            )
-
-            print(bookmakers)
-
-            if not bookmakers:
-                print(
-                    "❌ No bookmakers returned"
-                )
-                return None
-
+            fixture = await find_stats_api_fixture(client, home_team, away_team)
+            if not fixture: return None
+            match_id = fixture.get("id", fixture.get("match_id"))
+            if not match_id or fixture.get("odds_available") is False: return None
+            odds_payload = await stats_api_get(client, f"/matches/{match_id}/odds")
+            bookmakers = odds_payload.get("data", odds_payload).get("bookmakers", [])
+            if not isinstance(bookmakers, list) or not bookmakers: return None
+            for preferred_bookmaker in BOOKMAKER_PRIORITY:
+                bookmaker = next((b for b in bookmakers if str(b.get("bookmaker", "")).strip().lower() == preferred_bookmaker.lower()), None)
+                if bookmaker:
+                    parsed_odds = extract_match_odds_from_bookmaker(bookmaker)
+                    if parsed_odds: return {**parsed_odds, "bookmaker": preferred_bookmaker, "match_id": match_id, "kickoff_utc": fixture.get("utc_date", fixture.get("kickoff_utc")), "source": "TheStatsAPI"}
             for bookmaker in bookmakers:
-
-                bookmaker_name = bookmaker.get(
-                    "bookmaker",
-                    "Unknown"
-                )
-
-                print(
-                    f"🏦 BOOKMAKER: "
-                    f"{bookmaker_name}"
-                )
-
-                markets = bookmaker.get(
-                    "markets",
-                    {}
-                )
-
-                print(
-                    f"   MARKETS: "
-                    f"{list(markets.keys())}"
-                )
-
-                match_odds = markets.get(
-                    "match_odds"
-                )
-
-                if not match_odds:
-                    continue
-
-                print(
-                    f"   MATCH ODDS:"
-                )
-
-                print(match_odds)
-
-                home = match_odds.get(
-                    "home",
-                    {}
-                )
-
-                draw = match_odds.get(
-                    "draw",
-                    {}
-                )
-
-                away = match_odds.get(
-                    "away",
-                    {}
-                )
-
-                home_price = (
-                    home.get("last_seen")
-                    or home.get("opening")
-                )
-
-                draw_price = (
-                    draw.get("last_seen")
-                    or draw.get("opening")
-                )
-
-                away_price = (
-                    away.get("last_seen")
-                    or away.get("opening")
-                )
-
-                if all(
-                    [
-                        home_price,
-                        draw_price,
-                        away_price
-                    ]
-                ):
-
-                    print(
-                        "🎯 ODDS SUCCESS!"
-                    )
-
-                    print(
-                        f"HOME: {home_price}"
-                    )
-
-                    print(
-                        f"DRAW: {draw_price}"
-                    )
-
-                    print(
-                        f"AWAY: {away_price}"
-                    )
-
-                    return {
-                        "home_odds": float(
-                            home_price
-                        ),
-                        "draw_odds": float(
-                            draw_price
-                        ),
-                        "away_odds": float(
-                            away_price
-                        ),
-                        "bookmaker": bookmaker_name,
-                        "match_id": match_id,
-                        "kickoff_utc": (
-                            fixture.get(
-                                "utc_date"
-                            )
-                            or fixture.get(
-                                "kickoff_utc"
-                            )
-                        ),
-                        "source": "TheStatsAPI"
-                    }
-
-            print(
-                "❌ Bookmakers exist, "
-                "but no complete match_odds market "
-                "was found."
-            )
-
+                bookmaker_name = str(bookmaker.get("bookmaker", "Unknown"))
+                parsed_odds = extract_match_odds_from_bookmaker(bookmaker)
+                if parsed_odds: return {**parsed_odds, "bookmaker": bookmaker_name, "match_id": match_id, "kickoff_utc": fixture.get("utc_date", fixture.get("kickoff_utc")), "source": "TheStatsAPI"}
             return None
-
-        except Exception as e:
-
-            print(
-                "🔥 THESTATSAPI EXCEPTION:"
-            )
-
-            print(
-                repr(e)
-            )
-
-            return None
+        except: return None
 
 def calculate_poisson_ou(expected_goals: float, line: float):
     under_prob = poisson.cdf(int(line), expected_goals)
