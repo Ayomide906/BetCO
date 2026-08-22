@@ -21,20 +21,21 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_DIR = BASE_DIR / "model"
 DATA_DIR = BASE_DIR / "data"
 
-app = FastAPI(title="BetCO Live Prediction Engine", version="7.0.0")
+app = FastAPI(title="BetCO Live Prediction Engine", version="7.1.0")
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
 def get_api_key(api_key: str = Depends(api_key_header)):
     expected_api_key = os.getenv("APP_API_KEY", "fallback-dev-key")
     if api_key != expected_api_key:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API Key")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
     return api_key
 
 result_model, home_goals_model, away_goals_model, feature_pipeline, shap_explainer = None, None, None, None, None
-STATS_API_KEY = os.getenv("STATS_API_KEY", "")
-STATS_API_BASE = "https://api.thestatsapi.com/api/football"
-BOOKMAKER_PRIORITY = ["Pinnacle", "Bet365", "Betfair Sportsbook", "Paddy Power", "Kambi"]
+
+# --- SHARPAPI CONFIGURATION ---
+SHARP_API_KEY = os.getenv("SHARP_API_KEY")
+SHARP_API_BASE = "https://api.sharpapi.io/api/v1"
 
 class MatchRequest(BaseModel):
     home_team: str
@@ -43,11 +44,6 @@ class MatchRequest(BaseModel):
     home_odds: Optional[float] = None
     draw_odds: Optional[float] = None
     away_odds: Optional[float] = None
-
-class GoalTip(BaseModel):
-    market: str
-    probability: float
-    risk_level: str
 
 class BatchMatchRequest(BaseModel):
     matches: List[MatchRequest]
@@ -89,74 +85,73 @@ def standardize_team_name(input_name: str) -> str:
             if valid_team.lower() == matches[0]: return valid_team
     return input_name.strip().title()
 
-async def stats_api_get(client: httpx.AsyncClient, endpoint: str, params: Optional[dict] = None):
-    if not STATS_API_KEY: raise RuntimeError("STATS_API_KEY is not set.")
-    headers = {"Authorization": f"Bearer {STATS_API_KEY}", "Accept": "application/json"}
-    response = await client.get(f"{STATS_API_BASE}{endpoint}", headers=headers, params=params or {}, timeout=10.0)
-    if response.status_code != 200: raise RuntimeError(f"TheStatsAPI returned HTTP {response.status_code}")
-    return response.json()
-
-async def find_stats_api_fixture(client: httpx.AsyncClient, home_team: str, away_team: str):
-    page = 1
-    while True:
-        payload = await stats_api_get(client, "/matches", {"status": "scheduled", "per_page": 100, "page": page})
-        matches = payload.get("data", [])
-        if not matches: break
-        for match in matches:
-            home_obj, away_obj = match.get("home_team", {}), match.get("away_team", {})
-            if not isinstance(home_obj, dict) or not isinstance(away_obj, dict): continue
-            api_home = standardize_team_name(home_obj.get("name", ""))
-            api_away = standardize_team_name(away_obj.get("name", ""))
-            if api_home.lower() == home_team.lower() and api_away.lower() == away_team.lower(): return match
-        meta = payload.get("meta", {})
-        if page >= int(meta.get("total_pages", 1)): break
-        page += 1
-    return None
-
-def extract_match_odds_from_bookmaker(bookmaker: dict):
-    markets = bookmaker.get("markets", {})
-    if not isinstance(markets, dict): return None
-    match_odds = markets.get("match_odds")
-    if not isinstance(match_odds, dict): return None
-    def extract_price(outcome: dict):
-        if not isinstance(outcome, dict): return None
-        if outcome.get("last_seen"):
-            try: return float(outcome["last_seen"])
-            except: pass
-        if outcome.get("opening"):
-            try: return float(outcome["opening"])
-            except: pass
-        for key in ("price", "odds", "value"):
-            if outcome.get(key):
-                try: return float(outcome[key])
-                except: pass
-        return None
-    home_price = extract_price(match_odds.get("home", {}))
-    draw_price = extract_price(match_odds.get("draw", {}))
-    away_price = extract_price(match_odds.get("away", {}))
-    if None in (home_price, draw_price, away_price) or home_price <= 1 or draw_price <= 1 or away_price <= 1: return None
-    return {"home_odds": home_price, "draw_odds": draw_price, "away_odds": away_price}
+def american_to_decimal(american_odds):
+    try:
+        american = float(american_odds)
+        if american > 0: return round((american / 100.0) + 1.0, 2)
+        elif american < 0: return round((100.0 / abs(american)) + 1.0, 2)
+        return 1.0
+    except: return None
 
 async def fetch_prematch_odds(home_team: str, away_team: str):
-    if not STATS_API_KEY: return None
+    if not SHARP_API_KEY: return None
     async with httpx.AsyncClient() as client:
         try:
-            fixture = await find_stats_api_fixture(client, home_team, away_team)
-            if not fixture: return None
-            match_id = fixture.get("id", fixture.get("match_id"))
-            if not match_id or fixture.get("odds_available") is False: return None
-            odds_payload = await stats_api_get(client, f"/matches/{match_id}/odds")
-            bookmakers = odds_payload.get("data", odds_payload).get("bookmakers", [])
-            if not isinstance(bookmakers, list) or not bookmakers: return None
-            for preferred_bookmaker in BOOKMAKER_PRIORITY:
-                bookmaker = next((b for b in bookmakers if str(b.get("bookmaker", "")).strip().lower() == preferred_bookmaker.lower()), None)
-                if bookmaker:
-                    parsed_odds = extract_match_odds_from_bookmaker(bookmaker)
-                    if parsed_odds: return {**parsed_odds, "bookmaker": preferred_bookmaker, "match_id": match_id, "kickoff_utc": fixture.get("utc_date", fixture.get("kickoff_utc")), "source": "TheStatsAPI"}
-            for bookmaker in bookmakers:
-                bookmaker_name = str(bookmaker.get("bookmaker", "Unknown"))
-                parsed_odds = extract_match_odds_from_bookmaker(bookmaker)
-                if parsed_odds: return {**parsed_odds, "bookmaker": bookmaker_name, "match_id": match_id, "kickoff_utc": fixture.get("utc_date", fixture.get("kickoff_utc")), "source": "TheStatsAPI"}
+            # Query EPL odds (Note: SharpAPI might also use 'soccer_epl' or 'premier_league', adjusting if needed)
+            url = f"{SHARP_API_BASE}/odds"
+            headers = {"X-API-Key": SHARP_API_KEY, "Accept": "application/json"}
+            params = {"league": "EPL"} # Fallback if this is empty: change to sport=soccer
+            
+            response = await client.get(url, headers=headers, params=params, timeout=10.0)
+            if response.status_code != 200: return None
+                
+            items = response.json().get("data", [])
+            if not items: return None
+            
+            # 1. Filter out only the selections for OUR specific match
+            match_items = []
+            for item in items:
+                h_name = str(item.get("home_team", ""))
+                a_name = str(item.get("away_team", ""))
+                if standardize_team_name(h_name).lower() == home_team.lower() and standardize_team_name(a_name).lower() == away_team.lower():
+                    match_items.append(item)
+            
+            if not match_items: return None
+            
+            # 2. Group selections by sportsbook (to ensure we get H, D, A from the same bookie)
+            bookies = {}
+            for item in match_items:
+                sb = item.get("sportsbook", "Unknown")
+                if sb not in bookies: bookies[sb] = {}
+                
+                selection = str(item.get("selection", "")).lower()
+                price = item.get("odds_decimal")
+                if price is None and item.get("odds_american") is not None:
+                    price = american_to_decimal(item.get("odds_american"))
+                    
+                if price is not None:
+                    if selection in ["home", "1", home_team.lower(), str(item.get("home_team", "")).lower()]:
+                        bookies[sb]["home_odds"] = float(price)
+                    elif selection in ["draw", "x", "tie"]:
+                        bookies[sb]["draw_odds"] = float(price)
+                    elif selection in ["away", "2", away_team.lower(), str(item.get("away_team", "")).lower()]:
+                        bookies[sb]["away_odds"] = float(price)
+                        
+                    bookies[sb]["match_id"] = item.get("event_id", "N/A")
+                    bookies[sb]["kickoff_utc"] = item.get("event_start_time", "N/A")
+
+            # 3. Return the first sportsbook that has all 3 odds available
+            for sb, odds in bookies.items():
+                if "home_odds" in odds and "draw_odds" in odds and "away_odds" in odds:
+                    return {
+                        "source": "SharpAPI",
+                        "bookmaker": sb,
+                        "home_odds": odds["home_odds"],
+                        "draw_odds": odds["draw_odds"],
+                        "away_odds": odds["away_odds"],
+                        "match_id": odds.get("match_id"),
+                        "kickoff_utc": odds.get("kickoff_utc")
+                    }
             return None
         except: return None
 
@@ -209,7 +204,7 @@ async def process_single_prediction(match: MatchRequest):
         live_odds = await fetch_prematch_odds(home_clean, away_clean)
         if not live_odds: raise HTTPException(status_code=400, detail=f"Could not automatically fetch pre-match odds for {home_clean} vs {away_clean}. Please provide manually.")
         home_odds, draw_odds, away_odds = live_odds["home_odds"], live_odds["draw_odds"], live_odds["away_odds"]
-        odds_source, odds_bookmaker, match_id, kickoff_utc = live_odds.get("source", "TheStatsAPI"), live_odds.get("bookmaker"), live_odds.get("match_id"), live_odds.get("kickoff_utc")
+        odds_source, odds_bookmaker, match_id, kickoff_utc = live_odds.get("source", "SharpAPI"), live_odds.get("bookmaker"), live_odds.get("match_id"), live_odds.get("kickoff_utc")
     
     if home_odds <= 1 or draw_odds <= 1 or away_odds <= 1: raise HTTPException(status_code=400, detail="Invalid decimal odds. Must be > 1.")
     
@@ -244,7 +239,7 @@ async def process_single_prediction(match: MatchRequest):
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "message": "BetCO Engine is running.", "odds_provider": "TheStatsAPI", "odds_mode": "pre-match"}
+    return {"status": "online", "message": "BetCO Engine is running.", "odds_provider": "SharpAPI", "odds_mode": "pre-match"}
 
 @app.post("/predict")
 async def predict_match(match: MatchRequest, api_key: str = Depends(get_api_key)):
