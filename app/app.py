@@ -1,43 +1,33 @@
-import os
-os.environ["GIT_PYTHON_REFRESH"] = "0"
-from dotenv import load_dotenv
-load_dotenv()
-import joblib
+import os, time, joblib, httpx, difflib, shap
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
 from typing import Optional, List
 import pandas as pd
 import numpy as np
-import httpx
-import difflib
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel
 from catboost import CatBoostClassifier, CatBoostRegressor
 from scipy.stats import poisson
-import shap
 from src.feature_engineering import LiveMatchFeatureEngineer
+from dotenv import load_dotenv
+
+os.environ["GIT_PYTHON_REFRESH"] = "0"
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-MODEL_DIR = BASE_DIR / "model"
-DATA_DIR = BASE_DIR / "data"
+MODEL_DIR, DATA_DIR = BASE_DIR / "model", BASE_DIR / "data"
 
-app = FastAPI(title="BetCO Live Prediction Engine", version="8.1.0")
-API_KEY_NAME = "X-API-Key"
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
+app = FastAPI(title="BetCO Live Prediction Engine", version="9.0.0")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
 def get_api_key(api_key: str = Depends(api_key_header)):
-    expected_api_key = os.getenv("APP_API_KEY", "fallback-dev-key")
-    if api_key != expected_api_key:
+    if api_key != os.getenv("APP_API_KEY", "fallback-dev-key"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
     return api_key
 
 result_model, home_goals_model, away_goals_model, feature_pipeline, shap_explainer = None, None, None, None, None
 
-# --- SHARPAPI CONFIGURATION & CACHE ---
-SHARP_API_KEY = os.getenv("SHARP_API_KEY")
-SHARP_API_BASE = "https://api.sharpapi.io/api/v1"
-GLOBAL_SHARP_ITEMS = []
-CACHE_TIME = 0
+GLOBAL_ODDS_CACHE, CACHE_TIME = [], 0
 
 class MatchRequest(BaseModel):
     home_team: str
@@ -47,8 +37,7 @@ class MatchRequest(BaseModel):
     draw_odds: Optional[float] = None
     away_odds: Optional[float] = None
 
-class BatchMatchRequest(BaseModel):
-    matches: List[MatchRequest]
+class BatchMatchRequest(BaseModel): matches: List[MatchRequest]
 
 @app.on_event("startup")
 def load_resources():
@@ -74,96 +63,56 @@ TEAM_ALIASES = {"manchester united": "Man United", "man utd": "Man United", "man
 
 def standardize_team_name(input_name: str) -> str:
     if not isinstance(input_name, str): return str(input_name)
-    clean_input = input_name.strip().lower()
+    clean = input_name.strip().lower()
     for tag in [" f.c.", " a.f.c.", " football club", " fc", " afc"]:
-        if clean_input.endswith(tag): clean_input = clean_input[:-len(tag)].strip()
-    if clean_input.startswith("afc "): clean_input = clean_input[4:].strip()
-    if clean_input in TEAM_ALIASES: return TEAM_ALIASES[clean_input]
-    for valid_team in VALID_TEAMS:
-        if clean_input == valid_team.lower(): return valid_team
-    matches = difflib.get_close_matches(clean_input, [t.lower() for t in VALID_TEAMS], n=1, cutoff=0.6)
+        if clean.endswith(tag): clean = clean[:-len(tag)].strip()
+    if clean.startswith("afc "): clean = clean[4:].strip()
+    if clean in TEAM_ALIASES: return TEAM_ALIASES[clean]
+    for team in VALID_TEAMS:
+        if clean == team.lower(): return team
+    matches = difflib.get_close_matches(clean, [t.lower() for t in VALID_TEAMS], n=1, cutoff=0.6)
     if matches:
-        for valid_team in VALID_TEAMS:
-            if valid_team.lower() == matches[0]: return valid_team
+        for team in VALID_TEAMS:
+            if team.lower() == matches[0]: return team
     return input_name.strip().title()
 
-def american_to_decimal(american_odds):
-    try:
-        val = float(american_odds)
-        if val > 0: return round((val / 100) + 1, 3)
-        if val < 0: return round((100 / abs(val)) + 1, 3)
-    except: pass
-    return None
-
 async def fetch_prematch_odds(home_team: str, away_team: str):
-    global GLOBAL_SHARP_ITEMS, CACHE_TIME
-    import time
-    if not SHARP_API_KEY: return None
+    global GLOBAL_ODDS_CACHE, CACHE_TIME
+    key = os.getenv("ODDS_API_KEY") # Safe fallback for your convenience
+    if not key: return None
 
-    # Refresh Cache every 5 minutes
-    if time.time() - CACHE_TIME > 300 or not GLOBAL_SHARP_ITEMS:
-        GLOBAL_SHARP_ITEMS = []
+    # Fetch entire EPL odds in 1 request, cache for 5 minutes
+    if time.time() - CACHE_TIME > 300 or not GLOBAL_ODDS_CACHE:
         async with httpx.AsyncClient() as client:
-            url = f"{SHARP_API_BASE}/odds"
-            headers = {"X-API-Key": SHARP_API_KEY, "Accept": "application/json"}
-            next_cursor = None
-            
-            # Fetch up to 8 pages (to get past all outrights/futures)
-            for _ in range(8):
-                params = {"league": "england_-_premier_league"}
-                if next_cursor: params["cursor"] = next_cursor
-                
-                try:
-                    resp = await client.get(url, headers=headers, params=params, timeout=10.0)
-                    if resp.status_code != 200: break
-                    payload = resp.json()
-                    GLOBAL_SHARP_ITEMS.extend(payload.get("data", []))
-                    
-                    pagination = payload.get("pagination", {})
-                    if not pagination.get("has_more"): break
-                    next_cursor = pagination.get("next_cursor")
-                    if not next_cursor: break
-                except: break
-        CACHE_TIME = time.time()
+            url = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+            params = {"apiKey": key, "regions": "uk,eu", "markets": "h2h", "oddsFormat": "decimal"}
+            try:
+                resp = await client.get(url, params=params, timeout=10.0)
+                if resp.status_code == 200:
+                    GLOBAL_ODDS_CACHE = resp.json()
+                    CACHE_TIME = time.time()
+                else: print(f"Odds API Error: {resp.text}")
+            except Exception as e: print(f"Odds API Connection Error: {e}")
 
-    # Find the match in the cached items
-    match_items = []
-    for item in GLOBAL_SHARP_ITEMS:
-        h_name = str(item.get("home_team", ""))
-        a_name = str(item.get("away_team", ""))
-        
-        # Skip Futures/Outrights
-        if not a_name or "premier league" in h_name.lower(): continue
+    for match in GLOBAL_ODDS_CACHE:
+        h_name, a_name = str(match.get("home_team", "")), str(match.get("away_team", ""))
         
         if standardize_team_name(h_name).lower() == home_team.lower() and standardize_team_name(a_name).lower() == away_team.lower():
-            match_items.append(item)
-
-    if not match_items: return None
-
-    # Group by bookmaker
-    bookies = {}
-    for item in match_items:
-        sb = item.get("sportsbook", "Unknown")
-        if sb not in bookies: bookies[sb] = {}
-        
-        price = item.get("odds_decimal")
-        if price is None and item.get("odds_american") is not None:
-            price = american_to_decimal(item.get("odds_american"))
+            bookmakers = match.get("bookmakers", [])
+            if not bookmakers: continue
             
-        if price:
-            sel = standardize_team_name(str(item.get("selection", ""))).lower()
-            if sel in ["home", "1", home_team.lower()]: bookies[sb]["home_odds"] = float(price)
-            elif sel in ["draw", "x", "tie"]: bookies[sb]["draw_odds"] = float(price)
-            elif sel in ["away", "2", away_team.lower()]: bookies[sb]["away_odds"] = float(price)
-            
-            bookies[sb]["match_id"] = item.get("event_id", "N/A")
-            bookies[sb]["kickoff_utc"] = item.get("event_start_time", "N/A")
-
-    # Return the first bookmaker that has H, D, and A odds
-    for sb, odds in bookies.items():
-        if "home_odds" in odds and "draw_odds" in odds and "away_odds" in odds:
-            return {"source": "SharpAPI", "bookmaker": sb, **odds}
-            
+            target_bookie = next((b for b in bookmakers if b.get("key") in ["pinnacle", "bet365", "betfair"]), bookmakers[0])
+            for market in target_bookie.get("markets", []):
+                if market.get("key") == "h2h":
+                    h_odd, d_odd, a_odd = None, None, None
+                    for outcome in market.get("outcomes", []):
+                        name, price = outcome.get("name", ""), outcome.get("price")
+                        if name == match.get("home_team"): h_odd = price
+                        elif name.lower() == "draw": d_odd = price
+                        elif name == match.get("away_team"): a_odd = price
+                        
+                    if h_odd and d_odd and a_odd:
+                        return {"source": "TheOddsAPI", "bookmaker": target_bookie.get("title"), "home_odds": float(h_odd), "draw_odds": float(d_odd), "away_odds": float(a_odd), "match_id": match.get("id"), "kickoff_utc": match.get("commence_time")}
     return None
 
 def calculate_poisson_ou(expected_goals: float, line: float):
@@ -185,11 +134,9 @@ def get_best_goal_tip(goal_markets):
     tips = []
     for market_type, lines in goal_markets.items():
         for line, probs in lines.items():
-            if probs["Over"] >= 0.60:
-                tips.append({"market": f"{market_type} Over {line}", "probability": round(probs["Over"], 3), "risk_level": "Low Risk 🟢" if probs["Over"] >= 0.75 else "Medium Risk 🟡" if probs["Over"] >= 0.68 else "High Risk 🔴"})
-            if probs["Under"] >= 0.60:
-                tips.append({"market": f"{market_type} Under {line}", "probability": round(probs["Under"], 3), "risk_level": "Low Risk 🟢" if probs["Under"] >= 0.75 else "Medium Risk 🟡" if probs["Under"] >= 0.68 else "High Risk 🔴"})
-    tips = sorted(tips, key=lambda x: x["probability"], reverse=True)
+            if probs["Over"] >= 0.60: tips.append({"market": f"{market_type} Over {line}", "probability": round(probs["Over"], 3), "risk_level": "Low Risk 🟢" if probs["Over"] >= 0.75 else "Medium Risk 🟡" if probs["Over"] >= 0.68 else "High Risk 🔴"})
+            if probs["Under"] >= 0.60: tips.append({"market": f"{market_type} Under {line}", "probability": round(probs["Under"], 3), "risk_level": "Low Risk 🟢" if probs["Under"] >= 0.75 else "Medium Risk 🟡" if probs["Under"] >= 0.68 else "High Risk 🔴"})
+    tips.sort(key=lambda x: x["probability"], reverse=True)
     return tips if tips else [{"market": "Skip Goal Markets", "probability": 0.0, "risk_level": "High Risk 🔴 (No clear edge)"}]
 
 def extract_shap_explanation(input_df, predicted_class_index):
@@ -198,24 +145,22 @@ def extract_shap_explanation(input_df, predicted_class_index):
         shap_values = shap_explainer.shap_values(input_df)
         class_shap_values = shap_values[predicted_class_index] if isinstance(shap_values, list) else shap_values
         if len(class_shap_values.shape) > 1: class_shap_values = class_shap_values[0]
-        feature_impacts = sorted(list(zip(input_df.columns, class_shap_values)), key=lambda x: x[1], reverse=True)
+        feature_impacts = sorted(zip(input_df.columns, class_shap_values), key=lambda x: x[1], reverse=True)
         return [{"factor": feature_name_map.get(f, f), "impact_message": f"+{round(float(imp) * 100, 1)}% impact towards this outcome"} for f, imp in feature_impacts[:3]]
     except: return [{"factor": "Model Confidence", "impact_message": "Driven by overall team form and historical stats."}]
 
 async def process_single_prediction(match: MatchRequest):
-    home_clean = standardize_team_name(match.home_team)
-    away_clean = standardize_team_name(match.away_team)
-    if home_clean not in VALID_TEAMS or away_clean not in VALID_TEAMS:
-        raise HTTPException(status_code=400, detail=f"Unrecognized teams: {home_clean} or {away_clean}. Allowed: {', '.join(VALID_TEAMS)}")
+    home_clean, away_clean = standardize_team_name(match.home_team), standardize_team_name(match.away_team)
+    if home_clean not in VALID_TEAMS or away_clean not in VALID_TEAMS: raise HTTPException(status_code=400, detail=f"Unrecognized teams: {home_clean} or {away_clean}.")
     
     odds_source, odds_bookmaker, match_id, kickoff_utc = "manual", None, None, None
     if match.home_odds is not None and match.draw_odds is not None and match.away_odds is not None:
         home_odds, draw_odds, away_odds = float(match.home_odds), float(match.draw_odds), float(match.away_odds)
     else:
         live_odds = await fetch_prematch_odds(home_clean, away_clean)
-        if not live_odds: raise HTTPException(status_code=400, detail=f"Could not automatically fetch pre-match odds for {home_clean} vs {away_clean}. Please provide manually.")
+        if not live_odds: raise HTTPException(status_code=400, detail=f"Could not fetch odds for {home_clean} vs {away_clean}.")
         home_odds, draw_odds, away_odds = live_odds["home_odds"], live_odds["draw_odds"], live_odds["away_odds"]
-        odds_source, odds_bookmaker, match_id, kickoff_utc = live_odds.get("source", "SharpAPI"), live_odds.get("bookmaker"), live_odds.get("match_id"), live_odds.get("kickoff_utc")
+        odds_source, odds_bookmaker, match_id, kickoff_utc = live_odds.get("source", "TheOddsAPI"), live_odds.get("bookmaker"), live_odds.get("match_id"), live_odds.get("kickoff_utc")
     
     if home_odds <= 1 or draw_odds <= 1 or away_odds <= 1: raise HTTPException(status_code=400, detail="Invalid decimal odds. Must be > 1.")
     
@@ -223,14 +168,13 @@ async def process_single_prediction(match: MatchRequest):
     probs = result_model.predict_proba(input_df)[0]
     classes = list(result_model.classes_)
     raw_pred = result_model.predict(input_df)
-    predicted_class_str = str(raw_pred[0][0]) if isinstance(raw_pred[0], (list, np.ndarray)) else str(raw_pred[0])
-    predicted_class_idx = classes.index(raw_pred[0] if not isinstance(raw_pred[0], (list, np.ndarray)) else raw_pred[0][0])
+    pred_val = raw_pred[0][0] if isinstance(raw_pred[0], (list, np.ndarray)) else raw_pred[0]
+    predicted_class_idx = classes.index(pred_val)
     
     prob_dict = {str(cls): float(prob) for cls, prob in zip(classes, probs)}
     home_prob, draw_prob, away_prob = prob_dict.get("H", prob_dict.get("Home", 0.0)), prob_dict.get("D", prob_dict.get("Draw", 0.0)), prob_dict.get("A", prob_dict.get("Away", 0.0))
     
-    exp_home_goals = max(0.01, float(home_goals_model.predict(input_df)[0]))
-    exp_away_goals = max(0.01, float(away_goals_model.predict(input_df)[0]))
+    exp_home_goals, exp_away_goals = max(0.01, float(home_goals_model.predict(input_df)[0])), max(0.01, float(away_goals_model.predict(input_df)[0]))
     total_exp_goals = exp_home_goals + exp_away_goals
     
     goal_markets = {
@@ -242,24 +186,23 @@ async def process_single_prediction(match: MatchRequest):
     return {
         "match": f"{home_clean} vs {away_clean}", "match_id": match_id, "kickoff_utc": kickoff_utc,
         "odds": {"source": odds_source, "bookmaker": odds_bookmaker, "home": home_odds, "draw": draw_odds, "away": away_odds},
-        "winner": predicted_class_str, "market_analysis": determine_smart_market(home_prob, draw_prob, away_prob),
+        "winner": str(pred_val), "market_analysis": determine_smart_market(home_prob, draw_prob, away_prob),
         "probabilities": {"HomeWin": round(home_prob, 4), "Draw": round(draw_prob, 4), "AwayWin": round(away_prob, 4)},
         "expected_goals": {"home": round(exp_home_goals, 2), "away": round(exp_away_goals, 2), "total": round(total_exp_goals, 2)},
         "smart_goal_tip": get_best_goal_tip(goal_markets), "explanation": extract_shap_explanation(input_df, predicted_class_idx)
     }
 
 @app.get("/")
-def health_check():
-    return {"status": "online", "message": "BetCO Engine is running.", "odds_provider": "SharpAPI", "odds_mode": "pre-match"}
+def health_check(): return {"status": "online", "message": "BetCO Engine is running.", "odds_provider": "TheOddsAPI"}
 
 @app.post("/predict")
 async def predict_match(match: MatchRequest, api_key: str = Depends(get_api_key)):
-    if not result_model or not feature_pipeline: raise HTTPException(status_code=500, detail="Models or pipeline not initialized.")
+    if not result_model or not feature_pipeline: raise HTTPException(status_code=500, detail="Models not initialized.")
     return await process_single_prediction(match)
 
 @app.post("/predict-batch")
 async def predict_batch(batch: BatchMatchRequest, api_key: str = Depends(get_api_key)):
-    if not result_model or not feature_pipeline: raise HTTPException(status_code=500, detail="Models or pipeline not initialized.")
+    if not result_model or not feature_pipeline: raise HTTPException(status_code=500, detail="Models not initialized.")
     results, errors = [], []
     for match in batch.matches:
         try: results.append(await process_single_prediction(match))
