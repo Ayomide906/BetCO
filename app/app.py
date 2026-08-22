@@ -21,7 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_DIR = BASE_DIR / "model"
 DATA_DIR = BASE_DIR / "data"
 
-app = FastAPI(title="BetCO Live Prediction Engine", version="7.1.0")
+app = FastAPI(title="BetCO Live Prediction Engine", version="8.1.0")
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
@@ -33,9 +33,11 @@ def get_api_key(api_key: str = Depends(api_key_header)):
 
 result_model, home_goals_model, away_goals_model, feature_pipeline, shap_explainer = None, None, None, None, None
 
-# --- SHARPAPI CONFIGURATION ---
+# --- SHARPAPI CONFIGURATION & CACHE ---
 SHARP_API_KEY = os.getenv("SHARP_API_KEY")
 SHARP_API_BASE = "https://api.sharpapi.io/api/v1"
+GLOBAL_SHARP_ITEMS = []
+CACHE_TIME = 0
 
 class MatchRequest(BaseModel):
     home_team: str
@@ -87,73 +89,82 @@ def standardize_team_name(input_name: str) -> str:
 
 def american_to_decimal(american_odds):
     try:
-        american = float(american_odds)
-        if american > 0: return round((american / 100.0) + 1.0, 2)
-        elif american < 0: return round((100.0 / abs(american)) + 1.0, 2)
-        return 1.0
-    except: return None
+        val = float(american_odds)
+        if val > 0: return round((val / 100) + 1, 3)
+        if val < 0: return round((100 / abs(val)) + 1, 3)
+    except: pass
+    return None
 
 async def fetch_prematch_odds(home_team: str, away_team: str):
+    global GLOBAL_SHARP_ITEMS, CACHE_TIME
+    import time
     if not SHARP_API_KEY: return None
-    async with httpx.AsyncClient() as client:
-        try:
-            # Query EPL odds (Note: SharpAPI might also use 'soccer_epl' or 'premier_league', adjusting if needed)
+
+    # Refresh Cache every 5 minutes
+    if time.time() - CACHE_TIME > 300 or not GLOBAL_SHARP_ITEMS:
+        GLOBAL_SHARP_ITEMS = []
+        async with httpx.AsyncClient() as client:
             url = f"{SHARP_API_BASE}/odds"
             headers = {"X-API-Key": SHARP_API_KEY, "Accept": "application/json"}
-            params = {"league": "EPL"} # Fallback if this is empty: change to sport=soccer
+            next_cursor = None
             
-            response = await client.get(url, headers=headers, params=params, timeout=10.0)
-            if response.status_code != 200: return None
+            # Fetch up to 8 pages (to get past all outrights/futures)
+            for _ in range(8):
+                params = {"league": "england_-_premier_league"}
+                if next_cursor: params["cursor"] = next_cursor
                 
-            items = response.json().get("data", [])
-            if not items: return None
-            
-            # 1. Filter out only the selections for OUR specific match
-            match_items = []
-            for item in items:
-                h_name = str(item.get("home_team", ""))
-                a_name = str(item.get("away_team", ""))
-                if standardize_team_name(h_name).lower() == home_team.lower() and standardize_team_name(a_name).lower() == away_team.lower():
-                    match_items.append(item)
-            
-            if not match_items: return None
-            
-            # 2. Group selections by sportsbook (to ensure we get H, D, A from the same bookie)
-            bookies = {}
-            for item in match_items:
-                sb = item.get("sportsbook", "Unknown")
-                if sb not in bookies: bookies[sb] = {}
-                
-                selection = str(item.get("selection", "")).lower()
-                price = item.get("odds_decimal")
-                if price is None and item.get("odds_american") is not None:
-                    price = american_to_decimal(item.get("odds_american"))
+                try:
+                    resp = await client.get(url, headers=headers, params=params, timeout=10.0)
+                    if resp.status_code != 200: break
+                    payload = resp.json()
+                    GLOBAL_SHARP_ITEMS.extend(payload.get("data", []))
                     
-                if price is not None:
-                    if selection in ["home", "1", home_team.lower(), str(item.get("home_team", "")).lower()]:
-                        bookies[sb]["home_odds"] = float(price)
-                    elif selection in ["draw", "x", "tie"]:
-                        bookies[sb]["draw_odds"] = float(price)
-                    elif selection in ["away", "2", away_team.lower(), str(item.get("away_team", "")).lower()]:
-                        bookies[sb]["away_odds"] = float(price)
-                        
-                    bookies[sb]["match_id"] = item.get("event_id", "N/A")
-                    bookies[sb]["kickoff_utc"] = item.get("event_start_time", "N/A")
+                    pagination = payload.get("pagination", {})
+                    if not pagination.get("has_more"): break
+                    next_cursor = pagination.get("next_cursor")
+                    if not next_cursor: break
+                except: break
+        CACHE_TIME = time.time()
 
-            # 3. Return the first sportsbook that has all 3 odds available
-            for sb, odds in bookies.items():
-                if "home_odds" in odds and "draw_odds" in odds and "away_odds" in odds:
-                    return {
-                        "source": "SharpAPI",
-                        "bookmaker": sb,
-                        "home_odds": odds["home_odds"],
-                        "draw_odds": odds["draw_odds"],
-                        "away_odds": odds["away_odds"],
-                        "match_id": odds.get("match_id"),
-                        "kickoff_utc": odds.get("kickoff_utc")
-                    }
-            return None
-        except: return None
+    # Find the match in the cached items
+    match_items = []
+    for item in GLOBAL_SHARP_ITEMS:
+        h_name = str(item.get("home_team", ""))
+        a_name = str(item.get("away_team", ""))
+        
+        # Skip Futures/Outrights
+        if not a_name or "premier league" in h_name.lower(): continue
+        
+        if standardize_team_name(h_name).lower() == home_team.lower() and standardize_team_name(a_name).lower() == away_team.lower():
+            match_items.append(item)
+
+    if not match_items: return None
+
+    # Group by bookmaker
+    bookies = {}
+    for item in match_items:
+        sb = item.get("sportsbook", "Unknown")
+        if sb not in bookies: bookies[sb] = {}
+        
+        price = item.get("odds_decimal")
+        if price is None and item.get("odds_american") is not None:
+            price = american_to_decimal(item.get("odds_american"))
+            
+        if price:
+            sel = standardize_team_name(str(item.get("selection", ""))).lower()
+            if sel in ["home", "1", home_team.lower()]: bookies[sb]["home_odds"] = float(price)
+            elif sel in ["draw", "x", "tie"]: bookies[sb]["draw_odds"] = float(price)
+            elif sel in ["away", "2", away_team.lower()]: bookies[sb]["away_odds"] = float(price)
+            
+            bookies[sb]["match_id"] = item.get("event_id", "N/A")
+            bookies[sb]["kickoff_utc"] = item.get("event_start_time", "N/A")
+
+    # Return the first bookmaker that has H, D, and A odds
+    for sb, odds in bookies.items():
+        if "home_odds" in odds and "draw_odds" in odds and "away_odds" in odds:
+            return {"source": "SharpAPI", "bookmaker": sb, **odds}
+            
+    return None
 
 def calculate_poisson_ou(expected_goals: float, line: float):
     under_prob = poisson.cdf(int(line), expected_goals)
