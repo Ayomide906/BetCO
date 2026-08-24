@@ -6,6 +6,7 @@ from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, mean_a
 import mlflow
 import mlflow.catboost
 import os
+import argparse
 
 # 1. Silence GitPython warnings before importing MLflow
 os.environ["GIT_PYTHON_REFRESH"] = "0"
@@ -22,148 +23,111 @@ MODEL_DIR = BASE_DIR / "model"
 # The new model must be at least 1% better to replace the current production model.
 MIN_IMPROVEMENT_THRESHOLD = 0.01 
 
-def train_and_evaluate():
-    print("Loading engineered dataset...")
-    X = pd.read_csv(DATA_DIR / "X_train.csv")
-    y = pd.read_csv(DATA_DIR / "y_train.csv")
+def train_and_evaluate(league_name="EPL"):
+    print(f"\n🚀 Starting Training Pipeline for {league_name}...")
+    
+    # 1. Load engineered dataset specific to the league
+    # (Assuming your data prep script saves them as X_train_epl.csv, X_train_laliga.csv, etc.)
+    # If not, you can adjust these filenames!
+    x_path = DATA_DIR / f"X_train_{league_name.lower()}.csv"
+    y_path = DATA_DIR / f"y_train_{league_name.lower()}.csv"
+    
+    if not x_path.exists() or not y_path.exists():
+        print(f"❌ Could not find data for {league_name} at {x_path}. Run feature engineering first!")
+        return
+        
+    X = pd.read_csv(x_path)
+    y = pd.read_csv(y_path)
 
     # ==========================================
-    # 1. TIME-BASED 3-WAY SPLIT (Train/Val/Test)
+    # 2. TIME-BASED 3-WAY SPLIT (Train/Val/Test)
     # ==========================================
-    # Train (70%) - Used to fit the model
-    # Validation (15%) - Used for Early Stopping (CatBoost eval_set)
-    # Test (15%) - Strictly unseen data for Champion vs Challenger
-    
     n = len(X)
     train_end = int(n * 0.70)
     val_end = int(n * 0.85)
     
-    # Feature splits
-    X_train = X.iloc[:train_end]
-    X_val = X.iloc[train_end:val_end]
-    X_test = X.iloc[val_end:]
+    X_train, X_val, X_test = X.iloc[:train_end], X.iloc[train_end:val_end], X.iloc[val_end:]
+    y_train_all, y_val_all, y_test_all = y.iloc[:train_end], y.iloc[train_end:val_end], y.iloc[val_end:]
     
-    # Target splits (All)
-    y_train_all = y.iloc[:train_end]
-    y_val_all = y.iloc[train_end:val_end]
-    y_test_all = y.iloc[val_end:]
-    
-    # Separate the specific targets
-    y_train_result = y_train_all['FullTimeResult']
-    y_val_result = y_val_all['FullTimeResult']
-    y_test_result = y_test_all['FullTimeResult']
-    
-    y_train_h_goals = y_train_all['FullTimeHomeGoals']
-    y_val_h_goals = y_val_all['FullTimeHomeGoals']
-    y_test_h_goals = y_test_all['FullTimeHomeGoals']
-    
-    y_train_a_goals = y_train_all['FullTimeAwayGoals']
-    y_val_a_goals = y_val_all['FullTimeAwayGoals']
-    y_test_a_goals = y_test_all['FullTimeAwayGoals']
+    # Separate targets
+    y_train_result, y_val_result, y_test_result = y_train_all['FullTimeResult'], y_val_all['FullTimeResult'], y_test_all['FullTimeResult']
+    y_train_h_goals, y_val_h_goals, y_test_h_goals = y_train_all['FullTimeHomeGoals'], y_val_all['FullTimeHomeGoals'], y_test_all['FullTimeHomeGoals']
+    y_train_a_goals, y_val_a_goals, y_test_a_goals = y_train_all['FullTimeAwayGoals'], y_val_all['FullTimeAwayGoals'], y_test_all['FullTimeAwayGoals']
 
-    # 2. Setup MLflow
-    mlflow.set_tracking_uri(f"file://{BASE_DIR}/mlruns")
-    mlflow.set_experiment("Premier_League_Predictor")
+    # 3. Setup MLflow for the specific league
+    mlflow.set_tracking_uri(f"sqlite:///{DATA_DIR}/mlflow.db") # Using the SQLite DB we set up earlier!
     
-    with mlflow.start_run() as run:
+    # Dynamic experiment name (e.g., "Premier_League_Predictor" or "LaLiga_Predictor")
+    experiment_name = "Premier_League_Predictor" if league_name.upper() == "EPL" else f"{league_name}_Predictor"
+    mlflow.set_experiment(experiment_name)
+    
+    with mlflow.start_run(run_name=f"Automated_Training_{league_name}") as run:
         cat_features = ['HomeTeam', 'AwayTeam']
         
         # ==========================================
         # MODEL 1: MATCH RESULT (CLASSIFIER)
         # ==========================================
-        print("Training Result Classifier...")
+        print(f"[{league_name}] Training Result Classifier...")
         clf_model = CatBoostClassifier(
-            iterations=2000,
-            depth=4,
-            learning_rate=0.03,
-            l2_leaf_reg=5,
-            random_strength=2,
-            auto_class_weights='Balanced',
-            bagging_temperature=5,
-            loss_function="MultiClass",
-            eval_metric="MultiClass",
-            early_stopping_rounds=50,
-            random_seed=42,
-            verbose=0
+            iterations=2000, depth=4, learning_rate=0.03, l2_leaf_reg=5,
+            random_strength=2, auto_class_weights='Balanced', bagging_temperature=5,
+            loss_function="MultiClass", eval_metric="MultiClass", early_stopping_rounds=50,
+            random_seed=42, verbose=0
         )
-        # Fit using Val set for early stopping
         clf_model.fit(X_train, y_train_result, eval_set=(X_val, y_val_result), cat_features=cat_features)
         
-        # Evaluate exclusively on Test set
         clf_preds = clf_model.predict(X_test)
         clf_probs = clf_model.predict_proba(X_test)
-        
         acc = accuracy_score(y_test_result, clf_preds)
         loss = log_loss(y_test_result, clf_probs)
         
         # ==========================================
         # MODEL 2: HOME GOALS (REGRESSOR)
         # ==========================================
-        print("Training Home Goals Regressor...")
+        print(f"[{league_name}] Training Home Goals Regressor...")
         hg_model = CatBoostRegressor(
-            iterations=3000,
-            learning_rate=0.01,
-            depth=5,
-            loss_function="Poisson",
-            eval_metric="Poisson",
-            random_strength=5,
-            bagging_temperature=3,
-            random_seed=42,
-            early_stopping_rounds=100,
-            verbose=0
+            iterations=3000, learning_rate=0.01, depth=5, loss_function="Poisson",
+            eval_metric="Poisson", random_strength=5, bagging_temperature=3,
+            random_seed=42, early_stopping_rounds=100, verbose=0
         )
         hg_model.fit(X_train, y_train_h_goals, eval_set=(X_val, y_val_h_goals), cat_features=cat_features)
         
         hg_preds = hg_model.predict(X_test)
         hg_rmse = np.sqrt(mean_squared_error(y_test_h_goals, hg_preds))
         hg_mae = mean_absolute_error(y_test_h_goals, hg_preds)
-        hg_r2 = r2_score(y_test_h_goals, hg_preds)
         
         # ==========================================
         # MODEL 3: AWAY GOALS (REGRESSOR)
         # ==========================================
-        print("Training Away Goals Regressor...")
+        print(f"[{league_name}] Training Away Goals Regressor...")
         ag_model = CatBoostRegressor(
-            iterations=3000,
-            learning_rate=0.01,
-            depth=5,
-            loss_function="Poisson",
-            eval_metric="Poisson",
-            random_strength=5,
-            bagging_temperature=3,
-            random_seed=42,
-            early_stopping_rounds=100,
-            verbose=0
+            iterations=3000, learning_rate=0.01, depth=5, loss_function="Poisson",
+            eval_metric="Poisson", random_strength=5, bagging_temperature=3,
+            random_seed=42, early_stopping_rounds=100, verbose=0
         )
         ag_model.fit(X_train, y_train_a_goals, eval_set=(X_val, y_val_a_goals), cat_features=cat_features)
         
         ag_preds = ag_model.predict(X_test)
         ag_rmse = np.sqrt(mean_squared_error(y_test_a_goals, ag_preds))
         ag_mae = mean_absolute_error(y_test_a_goals, ag_preds)
-        ag_r2 = r2_score(y_test_a_goals, ag_preds)
 
         # ==========================================
         # LOGGING
         # ==========================================
-        print(f"\n--- NEW MODEL RESULTS (ON UNSEEN TEST DATA) ---")
+        print(f"\n--- {league_name} NEW MODEL RESULTS (TEST DATA) ---")
         print(f"Result Accuracy: {acc:.4f} | Log Loss: {loss:.4f}")
         print(f"Home Goals RMSE: {hg_rmse:.4f} | MAE: {hg_mae:.4f}")
         print(f"Away Goals RMSE: {ag_rmse:.4f} | MAE: {ag_mae:.4f}")
         
         mlflow.log_metrics({
-            "result_accuracy": acc,
-            "result_log_loss": loss,
-            "home_goals_rmse": hg_rmse,
-            "home_goals_mae": hg_mae,
-            "home_goals_r2": hg_r2,
-            "away_goals_rmse": ag_rmse,
-            "away_goals_mae": ag_mae,
-            "away_goals_r2": ag_r2
+            "result_accuracy": acc, "result_log_loss": loss,
+            "home_goals_rmse": hg_rmse, "home_goals_mae": hg_mae,
+            "away_goals_rmse": ag_rmse, "away_goals_mae": ag_mae
         })
         
-        mlflow.catboost.log_model(clf_model, "result_model")
-        mlflow.catboost.log_model(hg_model, "home_goals_model")
-        mlflow.catboost.log_model(ag_model, "away_goals_model")
+        mlflow.catboost.log_model(clf_model, f"{league_name.lower()}_result_model")
+        mlflow.catboost.log_model(hg_model, f"{league_name.lower()}_home_goals_model")
+        mlflow.catboost.log_model(ag_model, f"{league_name.lower()}_away_goals_model")
         
         # ==========================================
         # CHALLENGER VS CHAMPION COMPARISON
@@ -171,79 +135,71 @@ def train_and_evaluate():
         MODEL_DIR.mkdir(exist_ok=True)
         print("\n--- EVALUATING AGAINST CURRENT PRODUCTION MODELS ---")
 
-        # 1. Result Model (Log Loss Threshold - Lower is better)
-        prod_clf_path = MODEL_DIR / "prod_result_model.cbm"
+        # Dynamic paths for production models based on league
+        prefix = "prod" if league_name.upper() == "EPL" else f"prod_{league_name.lower()}"
+        prod_clf_path = MODEL_DIR / f"{prefix}_result_model.cbm"
+        prod_hg_path = MODEL_DIR / f"{prefix}_home_goals_model.cbm"
+        prod_ag_path = MODEL_DIR / f"{prefix}_away_goals_model.cbm"
+
+        # 1. Result Model (Log Loss)
         update_clf = True
         if prod_clf_path.exists():
             try:
                 old_clf = CatBoostClassifier().load_model(prod_clf_path)
-                old_probs = old_clf.predict_proba(X_test)
-                old_loss = log_loss(y_test_result, old_probs)
-                
-                print(f"Result Model -> Old Log Loss: {old_loss:.4f} | New Log Loss: {loss:.4f}")
-                
+                old_loss = log_loss(y_test_result, old_clf.predict_proba(X_test))
                 improvement = (old_loss - loss) / old_loss
+                print(f"Result -> Old Loss: {old_loss:.4f} | New Loss: {loss:.4f}")
                 if improvement < MIN_IMPROVEMENT_THRESHOLD:
-                    print(f"❌ Improvement ({improvement:.2%}) is below {MIN_IMPROVEMENT_THRESHOLD:.2%} threshold. Keeping Champion.")
+                    print(f"❌ Result model improvement ({improvement:.2%}) below threshold. Keeping Champion.")
                     update_clf = False
                 else:
-                    print(f"✅ New Result model achieved meaningful improvement ({improvement:.2%})! Promoting to Champion.")
+                    print(f"✅ Result model improved by {improvement:.2%}! Promoting to Champion.")
             except Exception as e:
-                print(f"⚠️ Could not load old Result model: {e}. Overwriting with new model.")
+                print(f"⚠️ Could not load old Result model: {e}. Overwriting.")
 
         if update_clf:
             clf_model.save_model(prod_clf_path)
-            print("💾 Production Result model updated.")
 
-        # 2. Home Goals (RMSE Threshold - Lower is better)
-        prod_hg_path = MODEL_DIR / "prod_home_goals_model.cbm"
+        # 2. Home Goals (RMSE)
         update_hg = True
         if prod_hg_path.exists():
             try:
                 old_hg = CatBoostRegressor().load_model(prod_hg_path)
-                old_hg_preds = old_hg.predict(X_test)
-                old_hg_rmse = np.sqrt(mean_squared_error(y_test_h_goals, old_hg_preds))
-                
-                print(f"Home Goals -> Old RMSE: {old_hg_rmse:.4f} | New RMSE: {hg_rmse:.4f}")
-                
+                old_hg_rmse = np.sqrt(mean_squared_error(y_test_h_goals, old_hg.predict(X_test)))
                 improvement = (old_hg_rmse - hg_rmse) / old_hg_rmse
+                print(f"Home Goals -> Old RMSE: {old_hg_rmse:.4f} | New RMSE: {hg_rmse:.4f}")
                 if improvement < MIN_IMPROVEMENT_THRESHOLD:
-                    print(f"❌ Improvement ({improvement:.2%}) is below {MIN_IMPROVEMENT_THRESHOLD:.2%} threshold. Keeping Champion.")
+                    print(f"❌ Home model improvement ({improvement:.2%}) below threshold. Keeping Champion.")
                     update_hg = False
                 else:
-                    print(f"✅ New Home Goals model achieved meaningful improvement ({improvement:.2%})! Promoting to Champion.")
-            except Exception as e:
-                print(f"⚠️ Could not load old Home Goals model: {e}. Overwriting with new model.")
+                    print(f"✅ Home model improved by {improvement:.2%}! Promoting to Champion.")
+            except Exception: pass
 
-        if update_hg:
-            hg_model.save_model(prod_hg_path)
-            print("💾 Production Home Goals model updated.")
+        if update_hg: hg_model.save_model(prod_hg_path)
 
-        # 3. Away Goals (RMSE Threshold - Lower is better)
-        prod_ag_path = MODEL_DIR / "prod_away_goals_model.cbm"
+        # 3. Away Goals (RMSE)
         update_ag = True
         if prod_ag_path.exists():
             try:
                 old_ag = CatBoostRegressor().load_model(prod_ag_path)
-                old_ag_preds = old_ag.predict(X_test)
-                old_ag_rmse = np.sqrt(mean_squared_error(y_test_a_goals, old_ag_preds))
-                
-                print(f"Away Goals -> Old RMSE: {old_ag_rmse:.4f} | New RMSE: {ag_rmse:.4f}")
-                
+                old_ag_rmse = np.sqrt(mean_squared_error(y_test_a_goals, old_ag.predict(X_test)))
                 improvement = (old_ag_rmse - ag_rmse) / old_ag_rmse
+                print(f"Away Goals -> Old RMSE: {old_ag_rmse:.4f} | New RMSE: {ag_rmse:.4f}")
                 if improvement < MIN_IMPROVEMENT_THRESHOLD:
-                    print(f"❌ Improvement ({improvement:.2%}) is below {MIN_IMPROVEMENT_THRESHOLD:.2%} threshold. Keeping Champion.")
+                    print(f"❌ Away model improvement ({improvement:.2%}) below threshold. Keeping Champion.")
                     update_ag = False
                 else:
-                    print(f"✅ New Away Goals model achieved meaningful improvement ({improvement:.2%})! Promoting to Champion.")
-            except Exception as e:
-                print(f"⚠️ Could not load old Away Goals model: {e}. Overwriting with new model.")
+                    print(f"✅ Away model improved by {improvement:.2%}! Promoting to Champion.")
+            except Exception: pass
 
-        if update_ag:
-            ag_model.save_model(prod_ag_path)
-            print("💾 Production Away Goals model updated.")
+        if update_ag: ag_model.save_model(prod_ag_path)
             
-        print("\n🎉 Training pipeline complete!")
+        print(f"\n🎉 {league_name} pipeline complete!")
 
 if __name__ == "__main__":
-    train_and_evaluate()
+    # Setup argparse so you can run: python src/train.py --league LaLiga
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--league", type=str, default="EPL", help="League to train (EPL, LaLiga, etc.)")
+    args = parser.parse_args()
+    
+    train_and_evaluate(args.league)

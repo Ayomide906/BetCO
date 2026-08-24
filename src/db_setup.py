@@ -7,6 +7,8 @@ def initialize_database():
 
     df1_raw = pd.read_csv(BASE_DIR /'data'/ "df1_raw.csv")
     team_df_raw = pd.read_csv(BASE_DIR /'data'/ "team_df_raw.csv")
+    team_df_raw_laliga=pd.read_csv(BASE_DIR /'data'/ "team_df_raw_laliga.csv")
+    df1_raw_laliga = pd.read_csv(BASE_DIR /'data'/ "df1_raw_laliga.csv")
 
     # 2. Connect to SQLite (creates the file if it doesn't exist)
     # Inside db_setup.py:
@@ -15,7 +17,8 @@ def initialize_database():
     # 3. Store DataFrames as SQL tables
     df1_raw.to_sql('matches_raw', conn, if_exists='replace', index=False)
     team_df_raw.to_sql('team_stats_raw', conn, if_exists='replace', index=False)
-
+    team_df_raw_laliga.to_sql('team_stats_raw_laliga', conn, if_exists='replace', index=False)
+    df1_raw_laliga.to_sql('matches_raw_laliga', conn, if_exists='replace', index=False)
     print("Database successfully initialized with existing CSV data!")
     conn.close()
 

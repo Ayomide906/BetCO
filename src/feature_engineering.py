@@ -54,9 +54,20 @@ class LiveMatchFeatureEngineer:
         return self
 
     def season_to_era(self, season):
-        if isinstance(season, str):
-            return 2026 - int(season.split("/")[0])
-        return season
+        # Convert to string just in case it's loaded as an integer
+        s = str(season).strip()
+        # 1. Handle the EPL format with slashes (e.g., "2024/2025")
+        if "/" in s:
+            start_year = int(s.split("/")[0])
+            # 2. Handle La Liga format (e.g., "506", "1011", "2425")
+        else:
+            if len(s) == 3:
+                start_year = 2000 + int(s[0])
+            elif len(s) == 4:
+                start_year = 2000 + int(s[:2])
+            else:
+                return 0 # Fallback
+        return 2026 - start_year
 
     def _calc_points_df1(self, df, venue):
         """Calculates points from raw df1 Result column (H, D, A)"""
@@ -223,18 +234,18 @@ class LiveMatchFeatureEngineer:
 # --- Usage Example ---
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-df1_raw = pd.read_csv(BASE_DIR / "df1_raw.csv")
-team_df_raw=pd.read_csv(BASE_DIR/"team_df_raw.csv")
+df1_raw_laliga = pd.read_csv(BASE_DIR/'data'/ "df1_raw_laliga.csv")
+team_df_raw_laliga=pd.read_csv(BASE_DIR/'data'/"team_df_raw_laliga.csv")
 
 
 # 2. Initialize and fit the pipeline
-pipeline = LiveMatchFeatureEngineer(df1_raw, team_df_raw)
+pipeline = LiveMatchFeatureEngineer(df1_raw_laliga, team_df_raw_laliga)
 pipeline.fit()
 
 # 3. Transform a live user request
 sample_features = pipeline.transform(
-    home_team="Arsenal",
-    away_team="Chelsea",
+    home_team="Barcelona",
+    away_team="Betis",
     season="2025/2026",
     home_odds=1.85,
     draw_odds=3.60,

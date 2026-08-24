@@ -24,35 +24,42 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        # Installs all required libraries for feature engineering and CatBoost training
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy catboost scikit-learn mlflow
 
-      - name: 1. Run Data Ingestion
+      - name: 1. Run Data Ingestion (All Leagues)
+        # Your ingest.py already loops through both leagues internally
         run: python src/ingest.py
 
-      - name: 2. Run Feature Engineering
-        # Assumes you saved the first script above as update_features.py
-        run: python src/update_features.py
+      - name: 2. Run Feature Engineering (EPL)
+        run: python src/update_features.py --league EPL
+        
+      - name: 3. Run Feature Engineering (La Liga)
+        run: python src/update_features.py --league LaLiga
 
-      - name: 3. Retrain Models
-        run: python src/train.py
+      - name: 4. Retrain Models (EPL)
+        run: python src/train.py --league EPL
+        
+      - name: 5. Retrain Models (La Liga)
+        run: python src/train.py --league LaLiga
 
       - name: Commit and Push Changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
           
-          # Add the updated database
+          # Add the SQLite databases (Data & MLflow Tracking)
           git add data/football_data.db
+          git add data/mlflow.db
           
-          # Add the newly generated training data
-          git add data/X_train.csv data/y_train.csv
+          # Add the newly generated training data for both leagues
+          git add data/X_train_epl.csv data/y_train_epl.csv
+          git add data/X_train_laliga.csv data/y_train_laliga.csv
           
-          # Add the newly trained models
+          # Add all newly trained models
           git add model/
           
           # Commit and push (will trigger Render to deploy the new models!)
-          git commit -m "Auto-update data and retrain models [skip ci]" || exit 0
+          git commit -m "Auto-update multi-league data and retrain models [skip ci]" || exit 0
           git push

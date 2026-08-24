@@ -1,0 +1,22 @@
+artifact_path: file:C:/code_py/BetCO/mlruns/2/models/m-9a0103fbf9704b7d878e45f1ef512bfe/artifacts
+flavors:
+  catboost:
+    catboost_version: 1.2.10
+    code: null
+    data: model.cb
+    model_type: CatBoostClassifier
+    save_format: cbm
+  python_function:
+    data: model.cb
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.catboost
+    python_version: 3.13.2
+mlflow_version: 3.6.0
+model_id: m-9a0103fbf9704b7d878e45f1ef512bfe
+model_size_bytes: 1189104
+model_uuid: m-9a0103fbf9704b7d878e45f1ef512bfe
+prompts: null
+run_id: 34effe6fc2814ae0ae72ac79a05ef147
+utc_time_created: '2026-08-24 17:18:34.946548'

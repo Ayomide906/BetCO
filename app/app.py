@@ -1,6 +1,6 @@
-import os, time, joblib, httpx, difflib, shap
+import os, joblib, difflib, shap
 from pathlib import Path
-from typing import Optional, List
+from typing import List
 import pandas as pd
 import numpy as np
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -17,7 +17,7 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_DIR, DATA_DIR = BASE_DIR / "model", BASE_DIR / "data"
 
-app = FastAPI(title="BetCO Live Prediction Engine", version="10.0.0")
+app = FastAPI(title="BetCO Live Prediction Engine", version="10.1.0")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
 def get_api_key(api_key: str = Depends(api_key_header)):
@@ -25,21 +25,40 @@ def get_api_key(api_key: str = Depends(api_key_header)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
     return api_key
 
-result_model, home_goals_model, away_goals_model, feature_pipeline, shap_explainer = None, None, None, None, None
-GLOBAL_ODDS_CACHE, CACHE_TIME = [], 0
+# ==========================================
+# MULTI-LEAGUE STATE DICTIONARIES
+# ==========================================
+MODELS = {"EPL": {}, "LaLiga": {}}
+PIPELINES = {}
+SHAP_EXPLAINERS = {}
 
+# ==========================================
+# SCHEMAS
+# ==========================================
 class MatchRequest(BaseModel):
+    league: str = "EPL"  # Defaults to EPL, can be 'LaLiga'
     home_team: str
     away_team: str
     season: str = "2026/2027"
-    home_odds: Optional[float] = None
-    draw_odds: Optional[float] = None
-    away_odds: Optional[float] = None
+    home_odds: float
+    draw_odds: float
+    away_odds: float
 
-class BatchMatchRequest(BaseModel): matches: List[MatchRequest]
+class BatchMatchRequest(BaseModel): 
+    matches: List[MatchRequest]
 
-VALID_TEAMS = ['Man City', 'West Ham', 'Middlesbrough', 'Southampton', 'Everton', 'Aston Villa', 'Bradford', 'Arsenal', 'Ipswich', 'Newcastle', 'Liverpool', 'Chelsea', 'Man United', 'Tottenham', 'Charlton', 'Sunderland', 'Derby', 'Coventry', 'Leicester', 'Leeds', 'Blackburn', 'Bolton', 'Fulham', 'West Brom', 'Birmingham', 'Wolves', 'Portsmouth', 'Crystal Palace', 'Norwich', 'Wigan', 'Watford', 'Sheffield United', 'Reading', 'Stoke', 'Hull', 'Burnley', 'Blackpool', 'Swansea', 'QPR', 'Cardiff', 'Bournemouth', 'Huddersfield', 'Brighton', 'Brentford', "Nott'm Forest", 'Luton']
-TEAM_ALIASES = {"manchester united": "Man United", "man utd": "Man United", "manchester city": "Man City", "nottingham forest": "Nott'm Forest", "nottingham forest fc": "Nott'm Forest", "spurs": "Tottenham", "tottenham hotspur": "Tottenham", "wolverhampton": "Wolves", "wolverhampton wanderers": "Wolves", "newcastle united": "Newcastle", "west ham united": "West Ham", "leeds united": "Leeds", "leicester city": "Leicester", "queens park rangers": "QPR", "coventry city": "Coventry", "hull city": "Hull", "ipswich town": "Ipswich", "brighton & hove albion": "Brighton", "brighton and hove albion": "Brighton", "aston villa": "Aston Villa", "crystal palace": "Crystal Palace", "charlton athletic": "Charlton", "bolton wanderers": "Bolton", "blackburn rovers": "Blackburn", "sheffield united": "Sheffield United", "west bromwich albion": "West Brom", "west brom": "West Brom", "bristol city": "Bristol City", "luton town": "Luton", "brentford fc": "Brentford", "bournemouth": "Bournemouth", "huddersfield town": "Huddersfield"}
+# ==========================================
+# UNIFIED TEAM ALIASES
+# ==========================================
+VALID_TEAMS = [
+    'Man City', 'West Ham', 'Middlesbrough', 'Southampton', 'Everton', 'Aston Villa', 'Bradford', 'Arsenal', 'Ipswich', 'Newcastle', 'Liverpool', 'Chelsea', 'Man United', 'Tottenham', 'Charlton', 'Sunderland', 'Derby', 'Coventry', 'Leicester', 'Leeds', 'Blackburn', 'Bolton', 'Fulham', 'West Brom', 'Birmingham', 'Wolves', 'Portsmouth', 'Crystal Palace', 'Norwich', 'Wigan', 'Watford', 'Sheffield United', 'Reading', 'Stoke', 'Hull', 'Burnley', 'Blackpool', 'Swansea', 'QPR', 'Cardiff', 'Bournemouth', 'Huddersfield', 'Brighton', 'Brentford', "Nott'm Forest", 'Luton',
+    'Barcelona', 'Sociedad', 'Betis', 'Zaragoza', 'Real Madrid', 'Malaga', 'Getafe', 'La Coruna', 'Villarreal', 'Santander', 'Osasuna', 'Ath Madrid', 'Celta', 'Mallorca', 'Ath Bilbao', 'Espanol', 'Cadiz', 'Alaves', 'Sevilla', 'Valencia', 'Gimnastic', 'Levante', 'Recreativo', 'Valladolid', 'Almeria', 'Murcia', 'Numancia', 'Sp Gijon', 'Tenerife', 'Xerez', 'Hercules', 'Vallecano', 'Granada', 'Elche', 'Cordoba', 'Eibar', 'Las Palmas', 'Leganes', 'Girona', 'Huesca', 'Oviedo'
+]
+
+TEAM_ALIASES = {
+    "manchester united": "Man United", "man utd": "Man United", "manchester city": "Man City", "nottingham forest": "Nott'm Forest", "spurs": "Tottenham", "tottenham hotspur": "Tottenham", "wolverhampton": "Wolves", "wolverhampton wanderers": "Wolves", "newcastle united": "Newcastle", "west ham united": "West Ham", "leeds united": "Leeds", "leicester city": "Leicester", "queens park rangers": "QPR", "coventry city": "Coventry", "hull city": "Hull", "ipswich town": "Ipswich", "brighton & hove albion": "Brighton", "brighton and hove albion": "Brighton", "aston villa": "Aston Villa", "crystal palace": "Crystal Palace", "charlton athletic": "Charlton", "bolton wanderers": "Bolton", "blackburn rovers": "Blackburn", "sheffield united": "Sheffield United", "west bromwich albion": "West Brom", "west brom": "West Brom", "bristol city": "Bristol City", "luton town": "Luton", "brentford fc": "Brentford", "bournemouth": "Bournemouth", "huddersfield town": "Huddersfield",
+    "atletico madrid": "Ath Madrid", "atlético madrid": "Ath Madrid", "real sociedad": "Sociedad", "real betis": "Betis", "deportivo la coruña": "La Coruna", "deportivo la coruna": "La Coruna", "racing santander": "Santander", "espanyol": "Espanol", "sporting gijon": "Sp Gijon", "sporting gijón": "Sp Gijon", "rayo vallecano": "Vallecano", "athletic bilbao": "Ath Bilbao", "celta vigo": "Celta"
+}
 
 def standardize_team_name(input_name: str) -> str:
     if not isinstance(input_name, str): return str(input_name)
@@ -56,52 +75,41 @@ def standardize_team_name(input_name: str) -> str:
             if team.lower() == matches[0]: return team
     return input_name.strip().title()
 
+# ==========================================
+# STARTUP & LOADERS
+# ==========================================
 @app.on_event("startup")
 def load_resources():
-    global result_model, home_goals_model, away_goals_model, feature_pipeline, shap_explainer
-    res_path = MODEL_DIR / "prod_result_model.cbm" if (MODEL_DIR / "prod_result_model.cbm").exists() else (MODEL_DIR / "result_model.pkl" if (MODEL_DIR / "result_model.pkl").exists() else MODEL_DIR / "result.pkl")
-    home_path = MODEL_DIR / "prod_home_goals_model.cbm" if (MODEL_DIR / "prod_home_goals_model.cbm").exists() else (MODEL_DIR / "Homegoal_model.pkl" if (MODEL_DIR / "Homegoal_model.pkl").exists() else MODEL_DIR / "home.pkl")
-    away_path = MODEL_DIR / "prod_away_goals_model.cbm" if (MODEL_DIR / "prod_away_goals_model.cbm").exists() else (MODEL_DIR / "Awaygoal_model.pkl" if (MODEL_DIR / "Awaygoal_model.pkl").exists() else MODEL_DIR / "away.pkl")
-    try:
-        result_model = CatBoostClassifier().load_model(res_path) if str(res_path).endswith(".cbm") else joblib.load(res_path)
-        home_goals_model = CatBoostRegressor().load_model(home_path) if str(home_path).endswith(".cbm") else joblib.load(home_path)
-        away_goals_model = CatBoostRegressor().load_model(away_path) if str(away_path).endswith(".cbm") else joblib.load(away_path)
-        shap_explainer = shap.TreeExplainer(result_model)
-    except Exception as e: print(f"Error loading models: {e}")
-    try:
-        df1_path = DATA_DIR / "df1_raw.csv" if (DATA_DIR / "df1_raw.csv").exists() else BASE_DIR / "df1_raw.csv"
-        team_path = DATA_DIR / "team_df_raw.csv" if (DATA_DIR / "team_df_raw.csv").exists() else BASE_DIR / "team_df_raw.csv"
-        feature_pipeline = LiveMatchFeatureEngineer(pd.read_csv(df1_path), pd.read_csv(team_path))
-        feature_pipeline.fit()
-    except Exception as e: print(f"Error initializing pipeline: {e}")
+    for league in ["EPL", "LaLiga"]:
+        print(f"Loading resources for {league}...")
+        prefix = "prod" if league == "EPL" else f"prod_{league.lower()}"
+        
+        res_path = MODEL_DIR / f"{prefix}_result_model.cbm"
+        home_path = MODEL_DIR / f"{prefix}_home_goals_model.cbm"
+        away_path = MODEL_DIR / f"{prefix}_away_goals_model.cbm"
+        
+        try:
+            MODELS[league]["result"] = CatBoostClassifier().load_model(res_path) if str(res_path).endswith(".cbm") else joblib.load(res_path)
+            MODELS[league]["home_goals"] = CatBoostRegressor().load_model(home_path) if str(home_path).endswith(".cbm") else joblib.load(home_path)
+            MODELS[league]["away_goals"] = CatBoostRegressor().load_model(away_path) if str(away_path).endswith(".cbm") else joblib.load(away_path)
+            SHAP_EXPLAINERS[league] = shap.TreeExplainer(MODELS[league]["result"])
+        except Exception as e: 
+            print(f"Error loading models for {league}: {e}")
+            
+        try:
+            df1_name = "df1_raw.csv" if league == "EPL" else f"df1_raw_{league.lower()}.csv"
+            team_name = "team_df_raw.csv" if league == "EPL" else f"team_df_raw_{league.lower()}.csv"
+            df1_path = DATA_DIR / df1_name if (DATA_DIR / df1_name).exists() else BASE_DIR / df1_name
+            team_path = DATA_DIR / team_name if (DATA_DIR / team_name).exists() else BASE_DIR / team_name
+            
+            PIPELINES[league] = LiveMatchFeatureEngineer(pd.read_csv(df1_path), pd.read_csv(team_path))
+            PIPELINES[league].fit()
+        except Exception as e: 
+            print(f"Error initializing pipeline for {league}: {e}")
 
-async def fetch_prematch_odds(home_team: str, away_team: str):
-    global GLOBAL_ODDS_CACHE, CACHE_TIME
-    key = os.getenv("ODDS_API_KEY")
-    if not key: return None
-    if time.time() - CACHE_TIME > 300 or not GLOBAL_ODDS_CACHE:
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.get("https://api.the-odds-api.com/v4/sports/soccer_epl/odds", params={"apiKey": key, "regions": "uk,eu", "markets": "h2h", "oddsFormat": "decimal"}, timeout=10.0)
-                if resp.status_code == 200: GLOBAL_ODDS_CACHE, CACHE_TIME = resp.json(), time.time()
-            except: pass
-    for match in GLOBAL_ODDS_CACHE:
-        if standardize_team_name(match.get("home_team", "")).lower() == home_team.lower() and standardize_team_name(match.get("away_team", "")).lower() == away_team.lower():
-            bookmakers = match.get("bookmakers", [])
-            if not bookmakers: continue
-            target_bookie = next((b for b in bookmakers if b.get("key") in ["pinnacle", "bet365", "betfair"]), bookmakers[0])
-            for market in target_bookie.get("markets", []):
-                if market.get("key") == "h2h":
-                    h_odd, d_odd, a_odd = None, None, None
-                    for outcome in market.get("outcomes", []):
-                        name, price = outcome.get("name", ""), outcome.get("price")
-                        if name == match.get("home_team"): h_odd = price
-                        elif name.lower() == "draw": d_odd = price
-                        elif name == match.get("away_team"): a_odd = price
-                    if h_odd and d_odd and a_odd:
-                        return {"source": "TheOddsAPI", "bookmaker": target_bookie.get("title"), "home_odds": float(h_odd), "draw_odds": float(d_odd), "away_odds": float(a_odd), "match_id": match.get("id"), "kickoff_utc": match.get("commence_time")}
-    return None
-
+# ==========================================
+# MATH & MARKET HELPERS
+# ==========================================
 def poisson_over_probability(expected_goals: float, line: float) -> float: return round(float(poisson.sf(int(line), expected_goals)), 4)
 def poisson_under_probability(expected_goals: float, line: float) -> float: return round(float(poisson.cdf(int(line), expected_goals)), 4)
 def build_ou_markets(expected_goals: float, lines=(0.5, 1.5, 2.5, 3.5, 4.5, 5.5)): return {str(line): {"Under": poisson_under_probability(expected_goals, line), "Over": poisson_over_probability(expected_goals, line)} for line in lines}
@@ -116,7 +124,6 @@ def calculate_btts(home_xg: float, away_xg: float):
 def calculate_clean_sheets(home_xg: float, away_xg: float): return {"Home Clean Sheet": round(float(poisson.pmf(0, away_xg)), 4), "Away Clean Sheet": round(float(poisson.pmf(0, home_xg)), 4)}
 def get_correct_scores(score_matrix, top_n=5): return [{"score": f"{x['home_goals']}-{x['away_goals']}", "probability": round(x["probability"], 4)} for x in sorted(score_matrix, key=lambda x: x["probability"], reverse=True)[:top_n]]
 def calculate_double_chance(home_prob, draw_prob, away_prob): return {"1X": round(home_prob + draw_prob, 4), "X2": round(draw_prob + away_prob, 4), "12": round(home_prob + away_prob, 4)}
-
 def calculate_draw_no_bet(home_prob, draw_prob, away_prob):
     non_draw = home_prob + away_prob
     return {"Home DNB": round(home_prob / non_draw, 4), "Away DNB": round(away_prob / non_draw, 4)} if non_draw > 0 else {"Home DNB": 0.0, "Away DNB": 0.0}
@@ -162,10 +169,10 @@ def create_smart_tips(home_team, away_team, home_xg, away_xg, total_xg, btts, cl
         if len(selected) >= 8: break
     return selected
 
-def extract_shap_explanation(input_df, predicted_class_index):
+def extract_shap_explanation(league, input_df, predicted_class_index):
     try:
         fmap = {"HomeAttackVsAwayDefense": "Home Attacking Advantage vs Away Defense", "AwayAttackVsHomeDefense": "Away Attacking Advantage vs Home Defense", "GoalFormDiffL5": "Goal Difference Form Momentum", "FormDiff": "Overall Team Form Gap", "HomeGoalsMeanL5Venuedpd": "Home Team Scoring Form at Home", "AwayGoalsMeanL5Venuedpd": "Away Team Scoring Form Away", "HomeH2HL5": "Home Team Head-to-Head Record", "AwayH2HL5": "Away Team Head-to-Head Record", "MatchBalance": "Market Odds Parity", "era": "Historical Season Context"}
-        vals = shap_explainer.shap_values(input_df)
+        vals = SHAP_EXPLAINERS[league].shap_values(input_df)
         c_vals = vals[predicted_class_index] if isinstance(vals, list) else vals
         if len(c_vals.shape) > 1: c_vals = c_vals[0]
         impacts = sorted(zip(input_df.columns, c_vals), key=lambda x: x[1], reverse=True)
@@ -181,22 +188,29 @@ def determine_smart_market(home_prob, draw_prob, away_prob):
     else: market_call = f"Outright {top_outcome}"
     return {"primary_prediction": top_outcome, "recommended_market": market_call, "confidence_gap": round(gap * 100, 1)}
 
+# ==========================================
+# ENDPOINTS
+# ==========================================
 async def process_single_prediction(match: MatchRequest):
+    league = match.league
+    if league not in MODELS or "result" not in MODELS[league]:
+        raise HTTPException(status_code=400, detail=f"League '{league}' not supported or models not loaded.")
+
     home_clean, away_clean = standardize_team_name(match.home_team), standardize_team_name(match.away_team)
-    if home_clean not in VALID_TEAMS or away_clean not in VALID_TEAMS: raise HTTPException(status_code=400, detail=f"Unrecognized teams: {home_clean} or {away_clean}.")
+    if home_clean not in VALID_TEAMS or away_clean not in VALID_TEAMS: 
+        raise HTTPException(status_code=400, detail=f"Unrecognized teams: {home_clean} or {away_clean}.")
     
-    odds_src, odds_bookie, match_id, kickoff = "manual", None, None, None
-    if None not in (match.home_odds, match.draw_odds, match.away_odds):
-        home_odds, draw_odds, away_odds = float(match.home_odds), float(match.draw_odds), float(match.away_odds)
-    else:
-        live = await fetch_prematch_odds(home_clean, away_clean)
-        if not live: raise HTTPException(status_code=400, detail=f"Could not fetch odds for {home_clean} vs {away_clean}.")
-        home_odds, draw_odds, away_odds = live["home_odds"], live["draw_odds"], live["away_odds"]
-        odds_src, odds_bookie, match_id, kickoff = live.get("source", "TheOddsAPI"), live.get("bookmaker"), live.get("match_id"), live.get("kickoff_utc")
+    if match.home_odds <= 1 or match.draw_odds <= 1 or match.away_odds <= 1: 
+        raise HTTPException(status_code=400, detail="Invalid odds. Must be > 1.")
     
-    if home_odds <= 1 or draw_odds <= 1 or away_odds <= 1: raise HTTPException(status_code=400, detail="Invalid odds. Must be > 1.")
+    # Use league-specific pipeline
+    input_df = PIPELINES[league].transform(home_team=home_clean, away_team=away_clean, season=match.season, home_odds=match.home_odds, draw_odds=match.draw_odds, away_odds=match.away_odds)
     
-    input_df = feature_pipeline.transform(home_team=home_clean, away_team=away_clean, season=match.season, home_odds=home_odds, draw_odds=draw_odds, away_odds=away_odds)
+    # Use league-specific models
+    result_model = MODELS[league]["result"]
+    home_goals_model = MODELS[league]["home_goals"]
+    away_goals_model = MODELS[league]["away_goals"]
+    
     probs, classes = result_model.predict_proba(input_df)[0], list(result_model.classes_)
     raw_pred = result_model.predict(input_df)
     pred_val = raw_pred[0][0] if isinstance(raw_pred[0], (list, np.ndarray)) else raw_pred[0]
@@ -221,8 +235,9 @@ async def process_single_prediction(match: MatchRequest):
     if not smart_tips: smart_tips = [{"market": "Skip Goal Markets", "probability": 0.0, "risk_level": "High Risk 🔴"}]
 
     return {
-        "match": f"{home_clean} vs {away_clean}", "match_id": match_id, "kickoff_utc": kickoff,
-        "odds": {"source": odds_src, "bookmaker": odds_bookie, "home": home_odds, "draw": draw_odds, "away": away_odds},
+        "league": league,
+        "match": f"{home_clean} vs {away_clean}",
+        "odds": {"source": "client_provided", "home": match.home_odds, "draw": match.draw_odds, "away": match.away_odds},
         "winner": str(pred_val), "market_analysis": determine_smart_market(h_prob, d_prob, a_prob),
         "probabilities": {"HomeWin": round(h_prob, 4), "Draw": round(d_prob, 4), "AwayWin": round(a_prob, 4)},
         "expected_goals": {"home": round(h_xg, 2), "away": round(a_xg, 2), "total": round(t_xg, 2)},
@@ -231,27 +246,20 @@ async def process_single_prediction(match: MatchRequest):
         "double_chance": calculate_double_chance(h_prob, d_prob, a_prob), "draw_no_bet": calculate_draw_no_bet(h_prob, d_prob, a_prob),
         "combination_markets": score_markets, "correct_score": get_correct_scores(s_matrix, 5),
         "smart_goal_tip": smart_tips, "smart_betting_tips": create_smart_tips(home_clean, away_clean, h_xg, a_xg, t_xg, btts, clean, score_markets),
-        "explanation": extract_shap_explanation(input_df, p_idx)
+        "explanation": extract_shap_explanation(league, input_df, p_idx)
     }
 
 @app.get("/")
-def health_check(): return {"status": "online", "message": "BetCO Engine is running.", "odds_provider": "TheOddsAPI", "engine_version": "10.0.0", "markets_supported": ["1X2", "Double Chance", "Draw No Bet", "Total Goals", "Home Team Goals", "Away Team Goals", "BTTS", "Clean Sheet", "Correct Score", "Win + Goals", "Win + BTTS", "Win To Nil", "Winning Margin"]}
-
-@app.get("/debug-odds")
-async def debug_odds(home_team: str = "Arsenal", away_team: str = "Coventry", api_key: str = Depends(get_api_key)):
-    try: return {"success": True, "match": f"{home_team} vs {away_team}", "odds": await fetch_prematch_odds(standardize_team_name(home_team), standardize_team_name(away_team))}
-    except Exception as e: return {"success": False, "match": f"{home_team} vs {away_team}", "error": str(e)}
+def health_check(): return {"status": "online", "message": "BetCO Engine is running.", "odds_provider": "client_provided", "engine_version": "10.1.0", "supported_leagues": ["EPL", "LaLiga"], "markets_supported": ["1X2", "Double Chance", "Draw No Bet", "Total Goals", "Home Team Goals", "Away Team Goals", "BTTS", "Clean Sheet", "Correct Score", "Win + Goals", "Win + BTTS", "Win To Nil", "Winning Margin"]}
 
 @app.post("/predict")
 async def predict_match(match: MatchRequest, api_key: str = Depends(get_api_key)):
-    if not result_model or not feature_pipeline: raise HTTPException(status_code=500, detail="Models not initialized.")
     return await process_single_prediction(match)
 
 @app.post("/predict-batch")
 async def predict_batch(batch: BatchMatchRequest, api_key: str = Depends(get_api_key)):
-    if not result_model or not feature_pipeline: raise HTTPException(status_code=500, detail="Models not initialized.")
     results, errors = [], []
     for match in batch.matches:
         try: results.append(await process_single_prediction(match))
-        except Exception as e: errors.append({"match": f"{match.home_team} vs {match.away_team}", "error": str(e)})
+        except Exception as e: errors.append({"match": f"{match.home_team} vs {match.away_team}", "league": match.league, "error": str(e)})
     return {"successful_predictions": results, "failed_predictions": errors, "summary": {"total_requested": len(batch.matches), "successful": len(results), "failed": len(errors)}}
