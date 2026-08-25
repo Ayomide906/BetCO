@@ -232,28 +232,21 @@ class LiveMatchFeatureEngineer:
         return result_df[self.feature_columns]
 
 # --- Usage Example ---
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-df1_raw_laliga = pd.read_csv(BASE_DIR/'data'/ "df1_raw_laliga.csv")
-team_df_raw_laliga=pd.read_csv(BASE_DIR/'data'/"team_df_raw_laliga.csv")
-
-
-# 2. Initialize and fit the pipeline
-pipeline = LiveMatchFeatureEngineer(df1_raw_laliga, team_df_raw_laliga)
-pipeline.fit()
-
-# 3. Transform a live user request
-sample_features = pipeline.transform(
+if __name__ =='__main__':
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    df1_raw_laliga = pd.read_csv(BASE_DIR/'data'/ "df1_raw_laliga.csv")
+    team_df_raw_laliga=pd.read_csv(BASE_DIR/'data'/"team_df_raw_laliga.csv")
+    pipeline = LiveMatchFeatureEngineer(df1_raw_laliga, team_df_raw_laliga)
+    pipeline.fit()
+    sample_features = pipeline.transform(
     home_team="Barcelona",
     away_team="Betis",
     season="2025/2026",
     home_odds=1.85,
     draw_odds=3.60,
     away_odds=4.50
-)
-
-# 4. Verify the output shape and content
-print(f"Feature Vector Shape: {sample_features.shape}") # Should be (1, 48)
-print("\nAny NaN values?", sample_features.isna().any().any()) # Should be False
-print(sample_features.head()[['AwayH2HL5',
-       'HomeH2HL5']])
+    )
+    print(f"Feature Vector Shape: {sample_features.shape}") # Should be (1, 48)
+    print("\nAny NaN values?", sample_features.isna().any().any()) # Should be False
+    print(sample_features.head()[['AwayH2HL5',
+                                  'HomeH2HL5']])
