@@ -50,8 +50,8 @@ jobs:
           git config --local user.name "GitHub Action Bot"
           
           # Add the SQLite databases (Data & MLflow Tracking)
-          git add data/football_data.db
-          git add data/mlflow.db
+          git add -f data/football_data.db
+          git add -f data/mlflow.db
           
           # Add the newly generated training data for both leagues
           git add data/X_train_epl.csv data/y_train_epl.csv
