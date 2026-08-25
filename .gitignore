@@ -21,6 +21,10 @@ football_dataset/
 data/*
 !data/football_data.db
 !data/df1_raw.csv
+!data/df1_raw_laliga.csv
 !data/team_df_raw.csv
-!data/X_train.csv
-!data/y_train.csv
+!data/team_df_raw_laliga.csv
+!data/X_train_epl.csv
+!data/y_train_epl.csv
+!data/X_train_laliga.csv
+!data/y_train_laliga.csv
