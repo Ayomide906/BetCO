@@ -135,10 +135,15 @@ def fetch_and_ingest():
 
         # Check existing data in the specific league table
         try:
+            # Try fetching the modern schema first
             existing_df = pd.read_sql_query(f"SELECT MatchDate, HomeTeam, AwayTeam FROM {config['matches_table']}", conn)
-        except sqlite3.OperationalError:
-            # Table might not exist yet, create empty DataFrame
-            existing_df = pd.DataFrame(columns=['MatchDate', 'HomeTeam', 'AwayTeam'])
+        except Exception as e:
+            if "no such column: MatchDate" in str(e):
+                # Fallback: Catch the missing column and pull 'Date' renaming it to 'MatchDate' on the fly
+                existing_df = pd.read_sql_query(f"SELECT Date as MatchDate, HomeTeam, AwayTeam FROM {config['matches_table']}", conn)
+            else:
+                # Table might not exist yet, create empty DataFrame
+                existing_df = pd.DataFrame(columns=['MatchDate', 'HomeTeam', 'AwayTeam'])
 
         merged = latest_matches.merge(
             existing_df,
