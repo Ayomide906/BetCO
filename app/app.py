@@ -57,7 +57,8 @@ VALID_TEAMS = [
 
 TEAM_ALIASES = {
     "manchester united": "Man United", "man utd": "Man United", "manchester city": "Man City", "nottingham forest": "Nott'm Forest", "spurs": "Tottenham", "tottenham hotspur": "Tottenham", "wolverhampton": "Wolves", "wolverhampton wanderers": "Wolves", "newcastle united": "Newcastle", "west ham united": "West Ham", "leeds united": "Leeds", "leicester city": "Leicester", "queens park rangers": "QPR", "coventry city": "Coventry", "hull city": "Hull", "ipswich town": "Ipswich", "brighton & hove albion": "Brighton", "brighton and hove albion": "Brighton", "aston villa": "Aston Villa", "crystal palace": "Crystal Palace", "charlton athletic": "Charlton", "bolton wanderers": "Bolton", "blackburn rovers": "Blackburn", "sheffield united": "Sheffield United", "west bromwich albion": "West Brom", "west brom": "West Brom", "bristol city": "Bristol City", "luton town": "Luton", "brentford fc": "Brentford", "bournemouth": "Bournemouth", "huddersfield town": "Huddersfield",
-    "atletico madrid": "Ath Madrid", "atlético madrid": "Ath Madrid", "real sociedad": "Sociedad", "real betis": "Betis", "deportivo la coruña": "La Coruna", "deportivo la coruna": "La Coruna", "racing santander": "Santander", "espanyol": "Espanol", "sporting gijon": "Sp Gijon", "sporting gijón": "Sp Gijon", "rayo vallecano": "Vallecano", "athletic bilbao": "Ath Bilbao", "celta vigo": "Celta"
+    "atletico madrid": "Ath Madrid", "atlético madrid": "Ath Madrid", "real sociedad": "Sociedad", "real betis": "Betis", "deportivo la coruña": "La Coruna", "deportivo la coruna": "La Coruna", "racing santander": "Santander", "espanyol": "Espanol", "sporting gijon": "Sp Gijon", "sporting gijón": "Sp Gijon", "rayo vallecano": "Vallecano", "athletic bilbao": "Ath Bilbao", "celta vigo": "Celta","deportivo alavés": "Alaves", "deportivo alaves": "Alaves",
+    "deportivo": "La Coruna",
 }
 
 def standardize_team_name(input_name: str) -> str:
