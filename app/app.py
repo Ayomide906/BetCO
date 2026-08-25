@@ -221,10 +221,14 @@ async def process_single_prediction(match: MatchRequest):
     h_xg, a_xg = max(0.01, float(home_goals_model.predict(input_df)[0])), max(0.01, float(away_goals_model.predict(input_df)[0]))
     t_xg = h_xg + a_xg
     
-    t_markets, h_markets, a_markets = build_ou_markets(t_xg, (0.5, 1.5, 2.5, 3.5, 4.5, 5.5)), build_ou_markets(h_xg, (0.5, 1.5, 2.5, 3.5)), build_ou_markets(a_xg, (0.5, 1.5, 2.5, 3.5))
+    t_markets = build_ou_markets(t_xg, (0.5, 1.5, 2.5, 3.5, 4.5, 5.5))
+    h_markets = build_ou_markets(h_xg, (0.5, 1.5, 2.5, 3.5))
+    a_markets = build_ou_markets(a_xg, (0.5, 1.5, 2.5, 3.5))
     btts, clean = calculate_btts(h_xg, a_xg), calculate_clean_sheets(h_xg, a_xg)
     s_matrix = build_score_matrix(h_xg, a_xg, 6)
     score_markets = calculate_score_markets(s_matrix, home_clean, away_clean)
+    double_chance = calculate_double_chance(h_prob, d_prob, a_prob)
+    draw_no_bet = calculate_draw_no_bet(h_prob, d_prob, a_prob)
     
     g_tips = [{"market": f"Total Match Goals Over {l}", "probability": p["Over"], "risk_level": get_risk_level(p["Over"])} for l, p in t_markets.items()] + \
              [{"market": f"Total Match Goals Under {l}", "probability": p["Under"], "risk_level": get_risk_level(p["Under"])} for l, p in t_markets.items()] + \
@@ -235,18 +239,68 @@ async def process_single_prediction(match: MatchRequest):
     smart_tips = sorted([x for x in g_tips if x["probability"] >= 0.60], key=lambda x: x["probability"], reverse=True)[:5]
     if not smart_tips: smart_tips = [{"market": "Skip Goal Markets", "probability": 0.0, "risk_level": "High Risk 🔴"}]
 
+    # ---------------------------------------------------------
+    # NEW FLATTENED ARRAY FOR THE FLUTTER APP (evaluated_markets)
+    # ---------------------------------------------------------
+    evaluated_markets = []
+    
+    # 1X2 Probabilities
+    evaluated_markets.extend([
+        {"market": "Home Win", "category": "1X2", "probability": round(h_prob, 4)},
+        {"market": "Draw", "category": "1X2", "probability": round(d_prob, 4)},
+        {"market": "Away Win", "category": "1X2", "probability": round(a_prob, 4)}
+    ])
+    # Double Chance
+    for k, v in double_chance.items():
+        evaluated_markets.append({"market": f"Double Chance {k}", "category": "Double Chance", "probability": v})
+    # Draw No Bet
+    for k, v in draw_no_bet.items():
+        evaluated_markets.append({"market": k, "category": "Draw No Bet", "probability": v})
+    # Total Goals
+    for line, probs in t_markets.items():
+        evaluated_markets.extend([
+            {"market": f"Total Goals Over {line}", "category": "Goals", "probability": probs["Over"]},
+            {"market": f"Total Goals Under {line}", "category": "Goals", "probability": probs["Under"]}
+        ])
+    # Home Team Goals
+    for line, probs in h_markets.items():
+        evaluated_markets.extend([
+            {"market": f"{home_clean} Over {line} Goals", "category": "Team Goals", "probability": probs["Over"]},
+            {"market": f"{home_clean} Under {line} Goals", "category": "Team Goals", "probability": probs["Under"]}
+        ])
+    # Away Team Goals
+    for line, probs in a_markets.items():
+        evaluated_markets.extend([
+            {"market": f"{away_clean} Over {line} Goals", "category": "Team Goals", "probability": probs["Over"]},
+            {"market": f"{away_clean} Under {line} Goals", "category": "Team Goals", "probability": probs["Under"]}
+        ])
+    # BTTS
+    for k, v in btts.items():
+        evaluated_markets.append({"market": f"BTTS: {k}", "category": "BTTS", "probability": v})
+    # Clean Sheet
+    for k, v in clean.items():
+        evaluated_markets.append({"market": k, "category": "Clean Sheet", "probability": v})
+    # Combinations
+    for k, v in score_markets.items():
+        evaluated_markets.append({"market": k, "category": "Combination", "probability": v})
+
+    # Sort the flattened array from highest probability to lowest
+    evaluated_markets = sorted(evaluated_markets, key=lambda x: x["probability"], reverse=True)
+
     return {
         "league": league,
         "match": f"{home_clean} vs {away_clean}",
         "odds": {"source": "client_provided", "home": match.home_odds, "draw": match.draw_odds, "away": match.away_odds},
-        "winner": str(pred_val), "market_analysis": determine_smart_market(h_prob, d_prob, a_prob),
+        "winner": str(pred_val), 
+        "market_analysis": determine_smart_market(h_prob, d_prob, a_prob),
         "probabilities": {"HomeWin": round(h_prob, 4), "Draw": round(d_prob, 4), "AwayWin": round(a_prob, 4)},
         "expected_goals": {"home": round(h_xg, 2), "away": round(a_xg, 2), "total": round(t_xg, 2)},
         "goal_markets": {"total_match_goals": t_markets, "home_team_goals": h_markets, "away_team_goals": a_markets},
         "both_teams_to_score": btts, "clean_sheet": clean,
-        "double_chance": calculate_double_chance(h_prob, d_prob, a_prob), "draw_no_bet": calculate_draw_no_bet(h_prob, d_prob, a_prob),
+        "double_chance": double_chance, "draw_no_bet": draw_no_bet,
         "combination_markets": score_markets, "correct_score": get_correct_scores(s_matrix, 5),
         "smart_goal_tip": smart_tips, "smart_betting_tips": create_smart_tips(home_clean, away_clean, h_xg, a_xg, t_xg, btts, clean, score_markets),
+        "evaluated_markets": evaluated_markets,  # <--- NEW FIELD APPENDED HERE
         "explanation": extract_shap_explanation(league, input_df, p_idx)
     }
 
