@@ -80,7 +80,7 @@ TEAM_ALIASES = {
     "atletico madrid": "Ath Madrid", "atlético madrid": "Ath Madrid",
     "real sociedad": "Sociedad",
     "real betis": "Betis",
-    "deportivo la coruña": "La Coruna", "deportivo la coruna": "La Coruna",
+    "deportivo la coruña": "La Coruna", "deportivo la coruna": "La Coruna",'RC Deportivo De La Coruna': "La Coruna",
     "racing santander": "Santander",
     "espanyol": "Espanol",
     "sporting gijon": "Sp Gijon", "sporting gijón": "Sp Gijon",

@@ -54,7 +54,7 @@ TEAM_ALIASES = {
     "rayo vallecano": "Vallecano", "athletic bilbao": "Ath Bilbao",
     "celta vigo": "Celta",
     "deportivo alavés": "Alaves", "deportivo alaves": "Alaves",
-    "deportivo": "La Coruna",
+    "deportivo": "La Coruna",'RC Deportivo De La Coruna': "La Coruna"
 }
 
 def standardize_team_name(input_name: str) -> str:
