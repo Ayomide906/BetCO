@@ -10,22 +10,24 @@ from datetime import datetime
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "football_data.db"
 
-# Automatically calculate the football-data season string (e.g., '2627')
+# Automatically calculate the football-data season string
 now = datetime.now()
 if now.month >= 8:
-    season = f"{str(now.year)[-2:]}{str(now.year + 1)[-2:]}"
+    url_season = f"{str(now.year)[-2:]}{str(now.year + 1)[-2:]}"
+    db_season = f"{now.year}/{now.year + 1}"
 else:
-    season = f"{str(now.year - 1)[-2:]}{str(now.year)[-2:]}"
+    url_season = f"{str(now.year - 1)[-2:]}{str(now.year)[-2:]}"
+    db_season = f"{now.year - 1}/{now.year}"
 
 # Define our leagues and their specific routing details
 LEAGUES = {
     "EPL": {
-        "url": f"https://www.football-data.co.uk/mmz4281/{season}/E0.csv",
+        "url": f"https://www.football-data.co.uk/mmz4281/{url_season}/E0.csv",
         "matches_table": "matches_raw",
         "team_table": "team_stats_raw"
     },
     "LaLiga": {
-        "url": f"https://www.football-data.co.uk/mmz4281/{season}/SP1.csv",
+        "url": f"https://www.football-data.co.uk/mmz4281/{url_season}/SP1.csv",
         "matches_table": "matches_raw_laliga",
         "team_table": "team_stats_raw_laliga"
     }
@@ -168,7 +170,7 @@ def fetch_and_ingest():
 
         # Format matches_raw (df1)
         new_df1 = pd.DataFrame({
-            'Season': '2024/2025',
+            'Season': db_season,
             'MatchDate': new_matches['Date'],
             'HomeTeam': new_matches['HomeTeam'],
             'AwayTeam': new_matches['AwayTeam'],
@@ -197,7 +199,7 @@ def fetch_and_ingest():
 
         # Format team_stats_raw (team_df)
         new_home = pd.DataFrame({
-            'MatchDate': new_matches['Date'], 'Season': '2024/2025',
+            'MatchDate': new_matches['Date'], 'Season': db_season,
             'Team': new_matches['HomeTeam'], 'Opponent': new_matches['AwayTeam'],
             'Venue': 'Home', 'Shots': new_matches['HST'],
             'GoalsFor': new_matches['FTHG'], 'GoalsAgainst': new_matches['FTAG'],
@@ -205,7 +207,7 @@ def fetch_and_ingest():
         })
 
         new_away = pd.DataFrame({
-            'MatchDate': new_matches['Date'], 'Season': '2024/2025',
+            'MatchDate': new_matches['Date'], 'Season': db_season,
             'Team': new_matches['AwayTeam'], 'Opponent': new_matches['HomeTeam'],
             'Venue': 'Away', 'Shots': new_matches['AST'],
             'GoalsFor': new_matches['FTAG'], 'GoalsAgainst': new_matches['FTHG'],
